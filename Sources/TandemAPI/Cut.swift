@@ -33,6 +33,11 @@ public struct CutRequest: ServiceCall {
     /// `falseStart` wins. Without either, stretches over 2 s are false
     /// starts. Fillers on their own never are.
     public var falseStart: Bool?
+    /// What each join leaves before the word after it, in seconds
+    /// (`LeadIn`, default 0.05): the rest of the pause it keeps goes after
+    /// the word before, so the clip coming in starts a frame or two before
+    /// Mike speaks.
+    public var lead: Double?
     /// Make the cut. Without it this is a dry run that returns the plan.
     public var apply: Bool?
     public var label: String?
@@ -42,10 +47,11 @@ public struct CutRequest: ServiceCall {
 
     public init(
         remove: [CutTarget], fillers: Bool? = nil, from: Time? = nil, to: Time? = nil, protect: [Time]? = nil,
-        falseStart: Bool? = nil, apply: Bool? = nil,
+        falseStart: Bool? = nil, lead: Double? = nil, apply: Bool? = nil,
         label: String? = nil, author: String? = nil, expectedRevision: Int? = nil
     ) {
         self.remove = remove
+        self.lead = lead
         self.fillers = fillers
         self.from = from
         self.to = to
@@ -66,6 +72,7 @@ public struct CutRequest: ServiceCall {
         to = try c.decodeTime(.to)
         protect = try c.decodeTimes(.protect)
         falseStart = try c.decodeIfPresent(Bool.self, forKey: .falseStart)
+        lead = try c.decodeIfPresent(Double.self, forKey: .lead)
         apply = try c.decodeIfPresent(Bool.self, forKey: .apply)
         label = try c.decodeIfPresent(String.self, forKey: .label)
         author = try c.decodeIfPresent(String.self, forKey: .author)
@@ -178,6 +185,10 @@ public struct CutStretch: Codable, Equatable, Sendable {
     /// it) that the cut keeps, because a word that stays is said on the far
     /// side of it: a word the transcript has well off, or missed.
     public var missed: String?
+    /// Placed in the quiet round words with no sound of their own (said too
+    /// quietly to stand out from the room, or not there), or in a stretch
+    /// with no sound in it, rather than in the pauses beside its words.
+    public var quiet: Bool?
     /// How each side of the join sounds, as `check --cuts` judges it.
     public var startEdge: CutJoinSide?
     public var endEdge: CutJoinSide?
@@ -220,6 +231,11 @@ extension CutResult: ReadableResult {
                 if stretch.falseStart {
                     line += stretch.broughtBack.map { "; a false start, so \"\($0)\" comes back" } ?? "; cut as a false start"
                 }
+                if stretch.quiet == true {
+                    line += stretch.text.isEmpty
+                        ? "; no words in it, so it's cut in the quiet either side"
+                        : "; its words are too quiet to find in the sound, so it's cut in the quiet either side of them. Listen with tandem clip"
+                }
                 if let missed = stretch.missed {
                     line += "; but \(missed) in the stretch asked for stays, as a word that stays is past it. Listen with tandem clip"
                 }
@@ -258,6 +274,21 @@ extension TandemService {
     /// `CutPlacer` takes over 3 s, room to reach a pause, and the slack
     /// transcript times get.
     static var cutWindow: Double { CutAudit.around + CutAudit.reach + CutPlanner.slack }
+    /// How far past the windows read the speech level is looked for when
+    /// they're all quiet.
+    static let levelReach = 60.0
+
+    /// Levels from the voiced frames of a read that's mostly quiet: a few
+    /// seconds of speech in two minutes of silence is under the loud tenth
+    /// `SpeechLevels(of:)` goes by. Half a second of voice is enough to
+    /// say there's a voice; with none, the file has none here.
+    static func sparseLevels(_ readings: [SpeechEnergy]) -> SpeechLevels {
+        let voiced = readings.flatMap { reading in
+            zip(reading.full, reading.high).filter { $0.0 > SpeechLevels.quietestVoice }.map(\.1)
+        }.sorted()
+        guard Double(voiced.count) * SpeechEnergy.frameSeconds >= 0.5 else { return SpeechLevels(highLoud: -120, isVoice: false) }
+        return SpeechLevels(highLoud: voiced[min(voiced.count - 1, voiced.count * 9 / 10)])
+    }
 
     public func cut(_ request: CutRequest, context: CallContext) async throws -> CutResult {
         guard !request.remove.isEmpty || request.fillers == true else {
@@ -269,6 +300,7 @@ extension TandemService {
         if let from = request.from, let to = request.to, to <= from {
             throw ServiceError(.badRequest, "from (\(from)) has to be before to (\(to)).")
         }
+        let lead = try Self.lead(request.lead)
         let (project, revision) = coordinator.snapshot()
         try checkExpected(request.expectedRevision, at: revision)
         let map = TranscriptTools.speechMap(project, analysis: analysis)
@@ -313,6 +345,10 @@ extension TandemService {
             } else {
                 var planned = plan(ask.range, falseStart: ask.falseStart, in: project)
                 planned.filled = ask.order == nil && ask.fillers > 0
+                // A filler on its own is a filled pause, kept as tight as
+                // tighten would leave it; anything else asked for gets
+                // Filmora's join where it has one.
+                if !planned.filled, !planned.onlyFillers, let keep = planned.filmoraKeep { planned.keep = keep }
                 plans.append(planned)
             }
             stretches.append(CutStretch(
@@ -341,7 +377,25 @@ extension TandemService {
                 for window in windows {
                     energies.append(try await SpeechEnergy.read(url: folder.url(for: item), from: window.lowerBound, to: window.upperBound))
                 }
-                let levels = SpeechLevels(of: energies)
+                var levels = SpeechLevels(of: energies)
+                // Quiet all round the edges (a long silence before the
+                // first word, a muttered aside): the speech level comes from
+                // further out, so a stretch of quiet can still be cut.
+                if !levels.isVoice {
+                    var wide = energies
+                    for window in windows {
+                        let reach = Self.levelReach
+                        if window.lowerBound > 0 {
+                            wide.append(try await SpeechEnergy.read(url: folder.url(for: item), from: max(0, window.lowerBound - reach), to: window.lowerBound))
+                        }
+                        // Not past the file's end, whose silence would water the level down.
+                        let end = min(window.upperBound + reach, item.duration?.seconds ?? .infinity)
+                        if end > window.upperBound {
+                            wide.append(try await SpeechEnergy.read(url: folder.url(for: item), from: window.upperBound, to: end))
+                        }
+                    }
+                    levels = Self.sparseLevels(wide)
+                }
                 guard levels.isVoice else {
                     unread[mediaID] = "there's no voice in the sound of \(URL(fileURLWithPath: item.path).lastPathComponent)"
                     continue
@@ -357,7 +411,7 @@ extension TandemService {
 
         var ranges: [TimeRange] = []
         for index in plans.indices {
-            stretches[index] = settle(plans[index], stretches[index], readings: readings, unread: unread, rate: project.settings.frameRate)
+            stretches[index] = settle(plans[index], stretches[index], readings: readings, unread: unread, rate: project.settings.frameRate, lead: lead)
             if let cut = stretches[index].cut, stretches[index].status == .cut { ranges.append(cut) }
         }
         let removed = TimeRange.union(ranges).reduce(Time.zero) { $0 + $1.duration }
@@ -613,6 +667,12 @@ extension TandemService {
         /// Fillers on their own are a filled pause, the minimum going by
         /// the whole of it (`CutPlanner.plan`'s `filled`).
         var filled = false
+        /// The keep Filmora's join gives this stretch, when it isn't only
+        /// fillers (see `filmoraJoin`).
+        var filmoraKeep: Double?
+        /// Every word it cuts is a filler, however it was asked for
+        /// (`tandem cut "um"` as much as `--fillers`).
+        var onlyFillers = false
         var removedText: String
         var before: String
         var after: String
@@ -646,6 +706,11 @@ extension TandemService {
         return first.mediaID == last.mediaID && first.speed == last.speed
             && abs((first.end - last.start).seconds) < 1e-6 && abs((first.sourceEnd - last.sourceStart).seconds) < 1e-6
     }
+
+    /// A join between sentences or round a false start: a sentence's pause
+    /// in the same train of thought (`FilmoraKind.sentence`). A retake picks
+    /// the same thought up again; Filmora's 0.8 s is for a new topic.
+    static var filmoraJoin: Double { FilmoraKind.sentence.total ?? 0.4 }
 
     func plan(_ range: TimeRange, falseStart: Bool?, in project: Project) -> Planned {
         var planned = Planned(
@@ -695,6 +760,7 @@ extension TandemService {
         )
 
         let removed = same ? cutFirst : cutFirst + cutLast
+        planned.onlyFillers = !removed.isEmpty && removed.allSatisfy { TranscriptTools.filler($0.text) != nil }
         planned.removedText = removed.map(\.text).joined(separator: " ")
         planned.before = keptBefore.suffix(4).map(\.text).joined(separator: " ")
         planned.after = keptAfter.prefix(4).map(\.text).joined(separator: " ")
@@ -703,15 +769,24 @@ extension TandemService {
         // 0.08 s mid-sentence). With no word before, it's the take's start.
         // Pauses under 0.5 s are left as they are, as tighten leaves them.
         if let word = keptBefore.last {
-            let kind = TranscriptTools.pauseKind(after: word.text)
+            // As it's spoken: Bark's full stop after "using" isn't the end
+            // of a sentence.
+            let kind = TranscriptTools.spokenKind(after: word.text)
             if let keep = TranscriptTools.mikeRules.keep(for: kind) { planned.keep = keep.seconds }
             planned.tightenFrom = TranscriptTools.mikeRules.shortest(for: kind).seconds
+            // Between sentences, or round a false start, the join leaves a
+            // sentence's 0.4 s, as `tighten --filmora` does for a pause in
+            // the same train of thought. Mid-sentence and comma joins stay
+            // tight.
+            if kind == .sentence || planned.falseStart { planned.filmoraKeep = max(planned.keep, Self.filmoraJoin) }
+        } else {
+            planned.filmoraKeep = max(planned.keep, Self.filmoraJoin)
         }
         return planned
     }
 
     /// Places a planned stretch in its sound, and says how it went.
-    func settle(_ planned: Planned, _ stretch: CutStretch, readings: [String: [CutPlacer]], unread: [String: String], rate: FrameRate) -> CutStretch {
+    func settle(_ planned: Planned, _ stretch: CutStretch, readings: [String: [CutPlacer]], unread: [String: String], rate: FrameRate, lead: Double = LeadIn.lead) -> CutStretch {
         var stretch = stretch
         stretch.text = planned.removedText
         stretch.before = planned.before
@@ -758,9 +833,10 @@ extension TandemService {
         let plan = CutPlanner.plan(
             start: startPlacer, first.boundary, end: endPlacer, last.boundary, keep: planned.keep, tightenFrom: planned.tightenFrom,
             falseStart: planned.falseStart, sameFile: Self.oneRun(first.clip, last.clip),
-            filled: planned.filled, snap: snap
+            filled: planned.filled, quiet: !planned.onlyFillers, lead: lead, snap: snap
         )
         stretch.falseStart = plan.falseStart
+        stretch.quiet = plan.quiet ? true : nil
         stretch.problem = plan.problem
         stretch.problemEdge = plan.problemEdge
         stretch.startEdge = plan.start.map { CutJoinSide(verdict: $0.verdict, margin: (Double($0.margin) * 10).rounded() / 10) }
@@ -803,6 +879,16 @@ extension TandemService {
         return stretch
     }
 
+    /// A request's lead (`LeadIn`), checked: what a join leaves before the
+    /// word after it.
+    static func lead(_ seconds: Double?) throws -> Double {
+        guard let seconds else { return LeadIn.lead }
+        guard seconds >= 0, seconds <= 1 else {
+            throw ServiceError(.badRequest, "`lead` is how long a clip runs before its first word, 0 to 1 s (default \(LeadIn.lead)).")
+        }
+        return seconds
+    }
+
     func reason(_ plan: CutPlan, _ planned: Planned) -> String {
         let atStart = plan.problemEdge != .end
         switch plan.problem {
@@ -815,7 +901,7 @@ extension TandemService {
             let side = atStart ? "into it from before" : "on past it"
             return "the voice runs \(side) with no pause within \(String(format: "%.1f", CutPlanner.slack)) s of where the transcript has the words. Left in: listen with tandem clip, or cut a wider stretch."
         case .noSpeech:
-            return "there's no speech in the sound where the transcript has these words."
+            return "there's no speech in the sound where the transcript has these words: they're too quiet to place a cut's edges on, or not there."
         case .nothingLeft:
             return "a false start with no pause inside it to cut to."
         case .notClean:

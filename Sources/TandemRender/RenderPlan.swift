@@ -213,16 +213,22 @@ enum RenderPlanner {
                 )
                 videoSegments.append(picture)
                 if let cutout = clip.video?.cutout, cutout.enabled {
-                    if assets?.matteURL(for: item, cutout: cutout) != nil {
+                    // While a long take is matted, a clip is cut out as soon
+                    // as the stretch it plays is (`MatteSpans`).
+                    let played = ZoomUpscaling.sourceRange(of: picture)
+                    if assets?.matteURL(for: item, cutout: cutout, covering: played) != nil {
                         var matte = picture
                         matte.role = .matte
                         matte.alpha = false
                         videoSegments.append(matte)
-                        if assets?.matteIsStandIn(for: item) == true {
+                        if assets?.matteIsStandIn(for: item, cutout: cutout, covering: played) == true {
                             warnings.add("The cutout matte for \(item.path) is still being remade with the clean plate; this uses the one before it.")
                         }
                     } else {
-                        warnings.add("No cutout matte for \(item.path) yet, showing the full frame.")
+                        // Per clip: while a long take is matted stretch by stretch, some of
+                        // its clips are cut out and some aren't, and a frame should only
+                        // warn about the clip it shows (`RenderWarnings.relevant`).
+                        warnings.add("No cutout matte for \(item.path) yet (clip \(clip.id)), showing the full frame.")
                     }
                 }
             }

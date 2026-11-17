@@ -11,7 +11,7 @@ export type AudioProperties = {
   /** Clip gain in dB, added after normalizeTo's levelling. */
   gainDB?: number;
   muted?: boolean;
-  /** Level the clip to this loudness (LUFS) from its file's measured loudness (within ±30 dB); gainDB goes on top. Speech clips use settings.speechLoudness. */
+  /** Level the clip to this loudness (LUFS) from its file's measured loudness (within ±30 dB); gainDB goes on top. Until the file is measured the clip plays at its own level: apply measures it, or warns. Speech clips use settings.speechLoudness. */
   normalizeTo?: number;
   /** Play SAM Audio's separation of the file (made by `tandem separate`) instead of its sound, and instead of voiceIsolation. Null to stop. */
   separation?: {
@@ -419,11 +419,11 @@ export type PlaceMediaArgs = {
   videoTrackID?: string;
 };
 
-/** Puts a file synced to a take by sound (tandem sync <file> sets its take) alongside the take's camera clips, linked to them so ripple cuts, trims and moves keep it in step. The take is cut where the file starts and stops. Another camera angle goes on its own cut track right above the camera's ("Angle 2"), its clips off until showAngle picks it, and its own sound isn't placed. A sound file (an external mic) goes on Voice, and the camera's own sound there moves to a muted "Camera sound" track, so the mic is what plays. */
+/** Puts a file synced to a take by sound (tandem sync <file> sets its take) alongside the take's camera clips, linked to them so ripple cuts, trims and moves keep it in step. The take is cut where the file starts and stops. Another camera angle goes on its own cut track right above the camera's ("Angle 2"), its clips off until showAngle picks it, and its own sound isn't placed. A sound file (an external mic) goes on Voice, and the camera's own sound there moves to a muted "Camera sound" track, so the mic is what plays, along with any sliver under half a second the mic just misses at a clip's edge. A second mic (another guest's) finds the first on Voice and goes on its own "Voice 2" track under it. */
 export type PlaceSyncedArgs = {
   /** The synced file. */
   mediaID: string;
-  /** Track ID or name, like Music. The track it goes on. Default: a new "Angle 2" track for a picture, Voice for sound. */
+  /** Track ID or name, like Music. The track it goes on. Default: a new "Angle 2" track for a picture, Voice for sound (a new "Voice 2" when another mic of the take is on Voice there). */
   trackID?: string;
 };
 

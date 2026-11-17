@@ -44,7 +44,11 @@ rounds up.
    answer). Then `tandem transcript <id>`. Background work (transcripts,
    mattes, proxies) is waited for with `tandem wait transcript` (or
    `matte`, `proxy`, plain `tandem wait` for every job), which makes it
-   itself when the app is closed. Never start `tandem serve` just to get a
+   itself when the app is closed. Plain `tandem wait` also makes every
+   transcript nothing has made yet (minutes for an hour-long take), so after
+   adding a few files wait on them with `--media`, or not at all, and don't
+   pipe a wait through `tail`: its progress lines are how you tell it's
+   working. Never start `tandem serve` just to get a
    transcript, and never poll `tandem media` or `tandem status` in a sleep
    loop. Only if Tandem's transcript can't do it (a language its
    engines don't support), local Whisper runs offline:
@@ -110,6 +114,24 @@ rounds up.
    - low frame rates: the screen recording moving at a few frames a second
      (macOS recorded it slowly). Cover it with the camera full screen, as
      Mike did in the Tandem video, or B-roll, or cut it.
+   - talk cut: whole sentences of what he says that a cut took out of the
+     take (retakes, false starts, redos and fragments aren't counted), most
+     of all his opening lines. It quotes them at the join. Put them back
+     unless it really is a mistake; if you cut a point for length, say so in
+     the hand-back so he can undo it (see "Live demos: cut the mistakes, not
+     the material").
+   - little or no B-roll: under a quarter of the time he's on camera full
+     screen has anything over it (his finished edits cover 35 to 85%). The
+     first hand-back has B-roll in: show what he names as he says it, using
+     the bare stretches it quotes.
+   - mid-sentence pause: half a second or more in the middle of a
+     sentence or after a comma. It goes by the words, not just Bark's full
+     stops ("using. | The latest" counts). Read it in context, then run the
+     `tighten --filmora --kinds` it gives, with the pause's kind set to
+     `mid` (see "Pauses by kind").
+   - PiP that isn't his usual: a camera clip shown small that isn't
+     `pipRight`/`pipLeft` with the cutout on. Apply the layout it gives; if
+     the matte isn't made yet, wait for it rather than framing his face.
 5. **Hand back.** Open the project in the app for Mike with
    `open "<video folder>/<name>.tandem"` (skip it if `tandem status` says
    the app already has it open), rather than asking him to open it. Then
@@ -166,21 +188,20 @@ transitions, media or markers.
 
 ## How Mike likes a take cut
 
-- **Tighten with `tandem tighten --mike`,** not a script of your own. It
-  does the rules below by what each pause follows (0.4 s after a sentence,
-  0.12 s after a comma, 0.08 s for a thinking pause mid-sentence, only
-  pauses of 0.5 s or more; a join never keeps under 0.03 s after a word or
-  0.08 s before one, so mid-sentence comes out at 0.11 s). Keep his
-  deliberate beats with
-  `--protect <time,...>`, and add `--widen` to open joins a cut left too
-  tight back out from the take's own silence (listen to those). Dry run
-  first, then `--apply`. It places each cut in the sound of every track
-  that plays there, never through sound the transcript doesn't know about
-  (someone off mic, an app, a breath, an "um"), cutting the quiet either
-  side of it, and lists the pauses it left alone for that, with where the
-  sound is: listen to them, and cut a stray "um" with `tandem cut --range`
-  if it should go. Bark writes most "um"s as words, so they split pauses
-  and stay until they're cut: run `tandem cut --fillers` before tightening.
+- **Cut the pauses with `tandem tighten --filmora --kinds <file>`,** not
+  a script of your own and not `--mike`. It finds pauses by volume, as his
+  old Filmora silence detection did (under -35 dB, and quiet above 4 kHz so
+  a soft final "s" is still a word and a breath is pause, for 0.3 s or
+  more), then cuts each to a total gap by its kind (see "Pauses by kind").
+  The dry run writes every pause to the file with about eight words either
+  side and a guess; read each one, ignoring Bark's punctuation, set its
+  `kind`, then run it again with `--apply`, which refuses while any kind is
+  empty. It judges each join as `check --cuts` would and leaves out a cut
+  that can't be made clean (listed in the plan). Then `check --cuts`. What
+  it keeps is anything loud enough, so a
+  stray "um", "so" or click stays: run `tandem cut --fillers` first, and
+  cut the rest with `tandem cut`. `--mike` (by the transcript's
+  punctuation) is only for when he asks for it.
 - **Never place an edge from transcript times,** with or without a margin.
   Mike heard Ian "cut off" 10 times over 4 review rounds on the whiteboard
   interview: "it's quite a common problem that we seem to get wrong,
@@ -255,11 +276,67 @@ transitions, media or markers.
   each in-point, and no in-point may open on a 15 to 20 ms blip of the cut
   word's tail. The "time." cut passed it: it sat in the gap before the
   word, and the word went missing whole.
-- **Pauses between sentences: 0.4 s.** It's the feel of his old Filmora
-  silence detection (0.4 s softening buffer, 0.5 s minimum, 25% volume
-  threshold). 0.2 s sounds rushed, as if the sentences are jammed together.
-  A cut that removes a retake or a stumble should leave about 0.4 s of real
-  silence across the join too, not trim right up to the words.
+- **Pauses by kind,** speech end to speech start, a breath counted as
+  pause:
+  - **mid** (inside a phrase): 0.12 s. It "should just sound like there
+    was no pause".
+  - **clause** (a comma, before and/but/so/because/which/if, a list item):
+    0.2 s.
+  - **sentence** (the next sentence in the same train of thought): 0.4 s.
+  - **topic** (a new topic or paragraph): 0.8 s, Filmora's 0.4 s buffer
+    each side.
+  - **keep** (deliberate: a scripted beat, a demo action on screen,
+    "an intentional long pause where I'm showing something on the
+    screen"): left alone.
+
+  How it got here, all 12 Nov 2026: he picked Filmora's own method by ear
+  over the transcript rules ("the way that I had it in Filmora before ...
+  was perfect"). Its 0.8 s everywhere then drew 7 comments on the Convex
+  Auth v2 cut: 5 mid-sentence ("don't forget mid sentence no big pause")
+  and 2 between sentences at 0.59 and 0.77 s ("longer than needed pause
+  here between sentences"). So 0.8 s is only for a change of topic. His
+  own trims on the Threadbear launch landed at 0.1, 0.18 and 0.35 s. Bark
+  writes a full stop wherever he pauses ("from scratch using. The
+  latest", "call this. functions", "halfway through. You don't end up",
+  "old convex v one. And now with this convex v2,"), so the kind is read
+  from the words, never the punctuation. `tandem cut` leaves a sentence's
+  0.4 s across a retake's join.
+- **The kept pause sits on the clip going out. The clip coming in starts
+  a frame or two before he speaks.** Mike, Let's Build It technical, 13 Nov
+  2026: "you don't start the next clip soon enough. So you end up with like
+  my gormless face on screen for like a couple of hundred milliseconds...
+  it should start the next clip like one frame or two frames before the
+  speech starts... add that extra time onto the end of the previous clip...
+  always kind of favor cutting the clip you're transitioning into shorter
+  at the start". `tighten` and `cut` now do this themselves: every join
+  keeps its pause after the word before and `--lead` (0.05 s) before the
+  word after, read from the take's sound (a breath is pause). For an edit
+  cut before that (13 Nov 2026) or by hand, `tandem tighten --lead-only`
+  (dry run, then `--apply`) rolls every join of the take the same way:
+  the clip going out grows only through quiet, joins under a wipe or card
+  are left alone, and any roll `check --cuts` would flag is left out.
+  Then `check --quick` (B-roll edges follow the moved cuts) and
+  `check --cuts --listen`. `tandem check` notes any join still showing
+  his face more than 0.1 s before he speaks (`faceWaits`).
+- **A fumble with no pause round it still gets cut, by hand.** `tandem cut`
+  leaves in a restart that runs straight into the next word, and reporting
+  "can't be cut cleanly" got three of them back as comments ("I kind of
+  like fumble my words a little bit here. Can you just tidy up"). A restart
+  repeats a sound, so cut from that sound's first onset to its second:
+  "into the [code, which actu- uh the] coder model" goes from the /k/
+  closure before "code" to the one before "coder"; "talking [to him being
+  able to play it.] To him or her" from the /t/ closure after "talking" to
+  just before the second "To". Find the closures in the take's sound at
+  10 ms (a stop's closure is 50 to 80 ms of near silence before its
+  burst), `rippleDeleteRange` between them, then read what the listen
+  check hears across the join. When he corrects himself, the corrected
+  version is the one that stays. A repeated phrase is a retake: cut the
+  first ("and a lot of that time it a lot | a lot of the time that
+  happened"). `lets-build-it-technical/.work/edit/aud.py` has the helpers.
+- **Throat clears and coughs go.** They sit alone between two silences, so
+  `tighten` keeps them as sound (its plan lists them as pauses it left
+  alone). Find the lone bump (lower and duller than a word) and cut it with
+  the silence round it down to the pause's kind.
 - **Longer gaps where they earn it:** the end of a paragraph, letting a
   point land, or while something animates on screen (a build finishing, a
   result appearing, a diagram moving). Never cut a pause while a demo
@@ -275,46 +352,33 @@ transitions, media or markers.
   doesn't want to sit there silently smiling.
 - **No clips under 2 s,** where all it takes is putting back a pause of a
   second or less between sentences. Never bring back a thinking pause or a
-  long silence to do it.
+  long silence to do it. `tighten --filmora --min-clip 2` does this,
+  putting back only a sentence or topic pause. It's off by default: with
+  mid-sentence pauses closed, most clips are short phrases, and on the Auth
+  v2 take it put back 34 sentence pauses, the long gaps he'd just flagged.
+  Use it on a long stretch with him full screen and nothing over it.
+  Filmora had no minimum clip length, only Volume Threshold, Minimum
+  Duration (the shortest silence it cuts) and Softening Buffer; this rule
+  is Mike's own, from Build Your Own Convex.
 - **The ending:** run on about 4 s after the sign-off, with a 3 s fade to
   black that starts about a second after it, and fade the music out with
   it. A 2 s fade at the end of a 5 s run-on "can probably start to fade
   out a bit sooner" (Muse Wonder, 2026-10-13). Run on with the real
   footage: a freeze of his last frame "looks weird" (What I Need video,
   2026-10-09).
-- **Mid-sentence pauses:** close his thinking pauses, 0.5 s or longer,
-  right up (to about 0.08 s, `--mid 0.08 --mid-min 0.5`, part of `--mike`),
-  so a sentence sounds like one thought. Leave
-  shorter ones (a breath, a natural pause) as he said them: closing every
-  gap of 0.2 s or more made 818 cuts in a 38-minute video, one every 2.8 s,
-  and the picture jumped around (Mike, 2026-10-05). The 0.4 s is for
-  between sentences. Leave live demo reactions alone.
-  On an unscripted screen demo, though, he wants the shorter mid-sentence
-  pauses gone too: "There's a heap of these like little micro pauses here
-  when I'm mid sentence. Can you get rid of them please?", applied to the
-  whole video (Threadbear launch, 2026-11-03, a screen demo with him in the
-  corner most of the time). What closed them: quiet gaps of about 0.25 s or
-  more mid-sentence down to about 0.13 s, and commas over 0.3 s to 0.15 s,
-  leaving breaths under that alone. Bark's full stops and capitals can't be
-  trusted in his fast runs ("some of the other really nice little. |
-  Productivity features" was the pause he flagged, and a 0.4 s sentence
-  keep had left it in), so read each long kept pause in context and decide
-  sentence or not yourself. Then let `check --cuts` move any edge that
-  clipped a word: edges from a level threshold cut soft word ends.
-  That still wasn't enough: on his next full watch he made dozens of 0.2 to
-  0.5 s mid-sentence trims himself and wrote "I've had to make lots of
-  little minor mid-sentence tightenings. I thought you had all these
-  fixed." Measure each gap from the take's own level, speech end to speech
-  start at about -42 dB, so a breath counts as part of the pause rather than
-  splitting it into two short quiet runs, then cut mid-sentence gaps over
-  0.2 s to about 0.1 s, gaps before but/and/so/because over 0.3 s to 0.18 s,
-  and sentence gaps over 0.5 s to 0.35 s (his own trims landed there).
-  Leave his own joins, the card gaps, the prompter-read cold open and his
-  sign-off beat alone, and never plan across a word a cut has half removed.
-  `check --cuts` then flags many of the new joins: apply its trim-to-pause
-  fixes, but its put-back fixes undo the cut, so only take those where the
-  clip's edge sits under 15 dB below speech and let `--listen` judge the
-  rest (two cuts came back unnoticed when the whole fix line was applied).
+- **Mid-sentence pauses:** the `mid` and `clause` kinds close them (see
+  "Pauses by kind"). History worth keeping: closing every gap of 0.2 s or
+  more on Build Your Own Convex made 818 cuts in 38 minutes and the
+  picture jumped about (2026-10-05), so pauses under 0.3 s are left as he
+  said them. On the Threadbear launch
+  (a screen demo, 2026-11-03) he still made dozens of 0.2 to 0.5 s
+  mid-sentence trims himself: "I thought you had all these fixed". Leave
+  his own joins, the card gaps, the prompter-read cold open and his
+  sign-off beat alone (`keep`), and never plan across a word a cut has
+  half removed. `check --cuts` may flag new joins: apply its
+  trim-to-pause fixes, but its put-back fixes undo the cut, so only take
+  those where the clip's edge sits under 15 dB below speech and let
+  `--listen` judge the rest.
 - **Live demos: keep the playback.** When Mike plays the timeline back to
   show the viewer ("let's have a look", "let's listen"), keep that stretch
   even though he's silent: "When I'm explicitly telling the user I'm
@@ -335,6 +399,15 @@ transitions, media or markers.
   starts as possible cuts, and he said: "You should definitely cut out false
   starts and silences and things like that... I meant it's like content"
   (2026-11-03).
+  A length he asked for ("under a minute") doesn't change this. On the Exact
+  + Convex demo for X (10 Nov 2026) I cut his opener, "I love Expo. Let's
+  Build It, my vibe coding app for kids, is built on it", plus four other
+  real lines to get from 1:25 to 1:12. He asked "Why have you cut out the bit
+  about Let's Build It, my initial opener?" and "If it means that I overrun
+  on time, doesn't matter". Cut only the mistakes, silences and asides to
+  meet a length, then hand back over length with a list of which points
+  would go to hit it, and let him pick. His personal reason for caring
+  (the opener) is the last thing to go.
 - **Live demos: when he leaves the desk,** go full screen on his camera
   from when he says he's going ("Cup of tea time") until he's back at the
   screen, and cover the time away with a time card meme, with its sound,
@@ -350,6 +423,55 @@ transitions, media or markers.
   both the note and what it points at.
 
 ## How Mike likes the rest of the edit
+
+### Before the first hand-back, every time
+
+Mike's words on the Convex Auth v2 video (12 Nov 2026), after a first cut
+that missed these: "It doesn't seem like you... remember the ways that we
+usually like to edit." Check each one before `tandem handback`:
+
+- **Start the cutout matte when the project is made.** PiP is `pipRight`
+  with the cutout, always. A long 4K take mattes for hours, so put one
+  camera clip in `pipRight` straight after placing the take (that starts
+  the job; `tandem new` reminds you), and never swap to a framed face box
+  to save time: "what's going on with the picture in picture here? This is
+  not our usual way". `tandem check` notes a PiP that isn't the usual.
+- **A Convex wipe at every section change,** the cold open into the first
+  section included, not just into and out of demos and the outro: "Can we
+  have a swipe here? ... I want section swipes, particularly the outro,
+  intro, etc."
+- **Proof on screen for every claim, including the lines he rewrote or
+  ad-libbed,** not only the script's callouts: "v2 is finally here" (the
+  docs or announcement), "non-beta forever" (the old beta label), "no per
+  user billing like Clerk or WorkOS" (their pricing pages), "drop it into
+  your next project" (the quick start). "We need to show something here",
+  "justify what I'm saying". Read the final transcript line by line for
+  anything that names a thing or makes a claim with nothing over it.
+- **Gags he describes on screen keep his face in shot** unless the note
+  says full screen: the caveats "whiz down on the side of the screen with
+  me still on the screen when I say asterisk", an overlay, not full-frame
+  B-roll.
+- **Every pause given its kind** in the kinds file, read from the words
+  (see "Pauses by kind"). `tandem check` notes the mid-sentence pauses
+  still left long, with a fix for each.
+
+- **No face waiting to talk, no fumbles left in.** After the pause pass,
+  `tandem tighten --lead-only --apply` if the edit was cut before
+  13 Nov 2026 (`tandem check`'s `faceWaits` notes say so), so the
+  incoming clip starts a frame or two before he speaks, and cut restarts,
+  self-corrections and throat clears by hand where `tandem cut` won't (both in "How Mike likes a take cut"). Read the
+  transcript once more for a phrase said twice.
+- **Look at his face at full size, a few frames across the take.** On the
+  Let's Build It technical video (13 Nov 2026) a yellow food mark sat at
+  the corner of his mouth for the whole 16-minute take, it went out on the
+  first upload, and Mike caught it afterwards. Crop his mouth and eyes at
+  4K from three or four moments before the first hand-back and say what
+  you see; a mark, a stray hair or something on his shirt is his call
+  (reshoot, leave, or clean it up).
+- **Look at every shot against its line before he does:** is it the real
+  thing (his app as it is, not a drawing of it), does the example on screen
+  back the claim, does anything sit still for over 2 s, does an animation
+  get 3 s to be read after it lands, does B-roll end on a camera cut?
 
 From his review comments on the Daytona and Build Your Own Convex videos
 (October 2026). The reasons matter more than the numbers.
@@ -704,6 +826,120 @@ YouTube.
   or marimba under the game's sounds, at -45 LUFS. He passed them first
   time: "musics good".
 
+### A scripted explainer with his own earlier video inside: Let's Build It, the technical follow-up (November 2026)
+
+His comments on the first edit, and what a second full review found (13 Nov
+2026). The project is `lets-build-it-technical`.
+
+- **B-roll of an app is the app being used, not a still of it.** A 6 s hold
+  on the project shelf got "We should show more than just a static screen
+  here." Cut together what the words say from the screen recording: the
+  shelf, into a game, the kid's words appearing as he speaks. Punch in
+  (1.5x) when the thing to read is small and only background is cropped.
+- **Show the app's own screens when he talks about its UI,** not a game a
+  kid made in it. "Getting the UI to look like this" and "the state that I
+  was happy with" both had a generated game over them.
+- **A crop on one person never cuts through another's face.** A 1.33x crop
+  on Josh took the top of Mike's head off: "it kind of cuts my face off".
+  Use the whole frame. Don't speed up footage of real people to fit, and
+  end the shot before he starts mouthing other words (cut back to his face
+  for the personal line: "and I'm really quite proud of it").
+- **A video of his played inside another plays to its real end.** The
+  builder stopped the announcement before the website invite and lost the
+  bit after the sign-off: "the cute thing where Joshie turns to me and asks
+  me a question... Why did he cut it out?" Take the whole export and end
+  just before its own fade to black.
+- **"Roll the clip" gets a film roll,** not a Convex wipe: a strip of film
+  leader (3, 2, 1, see-through sprocket holes) rolls down over the frame
+  with a projector whirr, the cut under it at its middle. It's
+  `assets/graphics/film-roll.mov` there (2 s, alpha, source in
+  `.work/film-roll/`), placed 1 s before the cut on Graphics.
+- **Read every line for "these", "this" and "here".** "Then you have your
+  tests like these" had his face over it; it needed the step definitions on
+  screen. A highlight belongs on the words that name it: the CI run going
+  green starts on "deterministically enforce it", not on the sentence
+  before.
+- **Set every pause's kind before the first hand-back, B-roll or not.** The
+  first cut left 0.8 s after nearly every sentence and 0.3 to 0.6 s inside
+  them, and the one he reached ("a slight pause before I say roll the
+  clip") he flagged. The kinds pass then took 49 s out of 10 minutes.
+- **A pause pass under placed B-roll: speed-fit, don't blade.** A ripple
+  cut shortens the B-roll over it at its tail, so every highlight after it
+  lands late. Before `tighten --apply`, note the take's own time under each
+  B-roll clip's start and end; afterwards put each clip back between those
+  two moments and set its speed so the same stretch of media plays (3 to
+  17% faster, no jumps, where blading would hitch every scroll).
+  `lets-build-it-technical/.work/edit/retime_broll.py save`, then `apply
+  --go`. Then `check --quick` for double jumps and one-frame slivers.
+- **Keep the pauses under segments and wipes** (`keep`): the card gaps, the
+  wipes' cuts, "Comment below" and "Like and subscribe", whose clicks sit
+  in a pause and were about to be deleted with it.
+- **The second round (16 comments on a full watch), beyond the cutting
+  rules above:**
+  - *His own app is shown as it really is.* A drawn iPad with a robot and a
+    big "Let me build it!" label: "That's not what it actually looks like
+    on the iPad. Can you show ... what it actually looks like inside the
+    app?" Put the real recording inside the graphic's device frame
+    (`OffthreadVideo`), and make the device big enough to read while it's
+    the subject.
+  - *The example on screen has to support the line.* Over "I couldn't tell
+    them apart" the blind picker showed a pair where "the one on the right
+    is clearly better. So this might be a bad example to show." Pick the
+    pair by looking at it.
+  - *After an animation lands, hold it.* Design notes arriving 0.8 s before
+    the cut: "doesn't give you a lot of time to see what happened". Run the
+    shot on 3 to 4 s (to the next sentence's cut) and start the next one
+    later, further in.
+  - *No waiting inside app footage.* A 2.5 s hold on "Your turn to
+    speak...": "cut that down so there's a bit more action going on".
+  - *B-roll runs to the camera's jump cut, not short of it.* Ending the
+    Josh shot a line early put a jump cut on his face: "The jump here is a
+    little bit abrupt. Can you just show the clip up to the end of this
+    clip so then it hides the jump?" This wins over cutting back to his
+    face for a personal line.
+  - *The first B-roll slides in from the top* right after his first word
+    ("Immediately after I say the word this"): a head `slide`, direction
+    down, 0.45 s, on the B-roll clip.
+  - *No bed under a cold open that runs into a clip with its own music:*
+    "it's a bit confusing when it goes into the intro video. Or maybe we
+    should have no music at this point at all."
+  - *A reaction plays out.* "Didn't finish me laughing here, let me finish
+    laughing please": the export faded to black over his laugh, so the raw
+    camera take carries on from where the fade starts (same framing), its
+    sound fading in as the export's fades out.
+  - *Bring the proof forward.* The credits screens came in on "running out
+    of credits"; he wanted them from "a paid for application": start a
+    shot where its subject is first named, and let it cover the passage.
+  - *Work he teases gets shown too:* "Can you justify that by showing a
+    thread in Threadbear working on a state machine component maybe?"
+    (with anything private hidden). Ask before taking his Threadbear
+    window, then `open "threadbear://thread/<id>"`, `computercub scroll
+    <window> up|down` and `computercub shot <window> --max 6000` (retina,
+    5120 wide). Take the two or three pages you need straight away: he
+    carries on using the app and the window moves to another thread. A
+    scroll moves about a page, so shots don't overlap and can't be
+    stitched: drift each page up slowly and slide to the next. Use only
+    the conversation column (the sidebar and Highlights list his other
+    threads), keep the title bar pinned, and put a marker on the phrase he
+    says. `lets-build-it-technical/.work/threadbear-shot/make.sh`.
+- **Cleaning a mark off a whole camera take** (the food by his mouth,
+  13 Nov 2026): `lets-build-it-technical/.work/destain/`. `corners.swift`
+  finds his lips' left corner on every frame with Apple's face landmarks
+  (colour alone confused his nose and ears with his lips); `destain.py`
+  finds the mark beside it (pixels more yellow than the skin round them)
+  and gives just those pixels the surrounding skin's colour and level,
+  keeping the stubble; `run-full.sh` runs it on Tinker Desk (16 minutes of
+  4K in about 15). Two traps: camera takes are slightly variable frame
+  rate (143 missing 1/30 s steps in 16 minutes), so decode with
+  `-fps_mode passthrough` and line patches up by timestamp or they drift
+  seconds out of step; and a re-encode loses the audio's lead-in and Record
+  It's camera-delay tag, so `merge.swift` puts the cleaned picture with the
+  original's untouched sound and tags (check with `tracks.swift` and a
+  cross-correlation) before `tandem media replace`.
+- **An ffmpeg clip cut with `-ss` before `-i` and a filter can start at
+  0.033 s,** and Tandem shows one black frame first. End the filter chain
+  with `setpts=PTS-STARTPTS`.
+
 ### Shorts cut from a conference talk: James's Abstract keynote
 
 Two 9:16 shorts from a filmmaker's 1080p multi-camera edit of James Cowling's
@@ -733,9 +969,13 @@ scripts and the speaker tracker are in
 - **A second camera or a separate mic: `tandem sync <files>`,** not a
   script of your own. It lines them up with the camera take by sound, puts
   them in its take and places them in one undo step: the angle on "Angle
-  2", off, and the mic on Voice with the camera's own sound muted. Show the
-  angle where it helps with `showAngle`; never untick its clips, unlink or
-  slip anything by hand. Read the lip-sync report it ends with.
+  2", off, and the mic on Voice with the camera's own sound muted (a second
+  guest's mic on "Voice 2"). Show the angle where it helps with
+  `showAngle`; never untick its clips, unlink or slip anything by hand.
+  Read the lip-sync report it ends with, and any "only N of M stretches
+  agreed" note. Don't check its offset with ffmpeg: ffmpeg keeps an AAC
+  file's encoder priming that Tandem's AVFoundation drops, so it reads
+  44 ms high (Databased S2E7, Nov 2026).
 - **Cutting a speaker's "right?"s:** only where there's a gap after it.
   Where it runs straight into the next word ("economy, right? And..."),
   leave it. The transcript's word times ran about 0.2 s early on this
@@ -755,6 +995,15 @@ scripts and the speaker tracker are in
   `who` left/right picks the talker in a two-shot, `x`/`z` pin a crop,
   `window` keeps a shot whole (an on-screen graphic, a wide from the back
   where he's tiny). Its `edit-plan.md` has the rest.
+- **Hold the crop still on a seated speaker.** Following the face every
+  0.4 s panned the frame each time Meagan leaned, and on the wide two-shot
+  from the back Vision swapped people, so the crop whipped between her and
+  Luke three times in 12 s. Liz: "camera was doing some weird panning in
+  this one" (Fireside 4, 6 Nov 2026, after it was already in Ordinal). One
+  steady crop per shot now (`build.py frame` only follows with `"follow":
+  true` in the framing file, for someone walking a stage). Look at every
+  wide two-shot's frames before export: the detector picks the wrong person
+  there, so pin its `x` on the talker.
 - **Open a Q&A Short on the question.** Every Fireside Short first went out
   starting on the answer ("The biggest one that I think is unsolved..."), and
   Mike: "We don't know what the question is when it starts. So can you
@@ -832,8 +1081,15 @@ and the upload batch.
   twice.
 - **Check the music is audible before exporting.** Beds added with
   `tandem assets use` and then `normalizeTo: -45` came back with `gain -31 dB`
-  as well (1.48), so the first export had no music. `tandem loudness --tracks
-  Music` over a stretch should read about -45 LUFS.
+  as well (1.48, and again on Databased S2E7), so the export had no music.
+  Turning `normalizeTo` on now resets that placed gain to 0 and says so, but
+  `tandem loudness --tracks Music` over a stretch should still read about
+  the level you set.
+- **Plain white captions with no highlight** (Databased, 2026-11-10: "big
+  plain white one-word captions" like its old editor): `tandem captions
+  --style plain --max-words 1 --size 150 --apply`, with `--color`, `--font`
+  and `--size` to change it. Patching the colour of `caption` captions
+  leaves the yellow highlight on; it comes from the preset.
 - **Pick moments that stand on their own:** a strong claim with its number,
   a rant, a "this broke" moment. Start about 0.1 s before the first word and
   end in the pause after a finished thought, checked with `tandem pauses`.
@@ -1089,6 +1345,57 @@ What he changed, in the order he asked:
   archive (`~/dev/me/the-pool`). Crop plans and surveys to the drawing:
   their title blocks carry his address and the designer's phone and email.
 
+### A short Convex demo for X and YouTube: Exact + Convex (November 2026)
+
+A scripted opener on camera, a YOLO demo of an agent-built app on Mac,
+iPhone (his own phone recordings) and web, then a short close
+(`convex-videos/exact-convex-demo/`). He asked for "under a minute" and
+it ended at 4:08 after four rounds, nearly all of them putting back what
+the first cuts took out. What he asked for:
+
+- **A Convex wipe in and out, always, on short videos like this.** The
+  library's `Convex wipe` segment as it goes from the opener into the demo
+  and from the demo into the outro: "I think we should always do that...
+  a really good way to break up the sections. Just adds a nice touch of
+  professionalism" (10 Nov 2026). Give each one a beat of his own silence
+  either side (run the clip on into the pause if the take has it) and keep
+  the frame clear of his next word.
+- **A length he asks for is soft. Cut mistakes, not material.** I cut his
+  "Let's Build It" opener and the demo's asides to chase a minute and he
+  asked why: "If it means that I overrun on time, doesn't matter". In the
+  YOLO demo he wanted far less cut: "you just cut out way too much of me
+  talking... that's why it's starting to not make sense". Cut only the
+  window-dragging, the redos ("let me just redo that bit"), long silences
+  and a phrase said twice in a row ("tighten this up... where I say the
+  same thing twice"). Close mid-sentence silences, which he still flags.
+- **B-roll on the first hand-back, even on a one-minute video.** Show what
+  he names as he names it: his own product (the Let's Build It homepage),
+  the announcement post he's reacting to, and the source for each claim
+  ("please justify what I'm saying by showing on the screen. The tweets,
+  for example"). Prefer the maker's own posts and demos (here Charlie
+  Cheever's thread and his demo video, via X's embed and the syndication
+  API's `mediaDetails` mp4) over his own footage, so the opener doesn't
+  show "the same stuff that we're about to show like 30 seconds later".
+- **When he reads a post out, highlight it as he reads it.** One still per
+  sentence with that sentence marked (Range wrapping in the embed page),
+  switched on his words: "Can you highlight on screen as I read this out?"
+- **Lips must match.** Swapping in his picture from a few seconds later
+  (so he was looking at the screen as he explained) got "Yeah, this is no
+  good. The lips need to match." Keep the take's own picture under his
+  voice; if he wants the doing on screen, show it on B-roll instead.
+- **Phone recordings over a desktop demo sit small and low** (about 60%,
+  bottom centre) when the desktop behind them matters: at full height it
+  "blocks the code... a bit too much".
+- **No word captions on the landscape video,** for X or YouTube. I added
+  them for X's muted autoplay; he took them off at export: "I think we can
+  remove the onscreen transcription" (10 Nov 2026). Leave them for the
+  portrait Short, where they belong, and ask before adding them to a
+  landscape video.
+- **Start the cutout matte early.** Tandem mattes the whole camera file
+  from the start, so an 8-minute 4K take took hours and every review round
+  showed the full camera rectangle in the corner ("Is that why it's not
+  showing?").
+
 ### A phone app demo as a portrait Short: Walkies (October 2026)
 
 A webcam take of Mike talking through his iPhone app, plus the phone's own
@@ -1259,6 +1566,40 @@ comments, changed these rules for a conversation like this:
   measuring and `dehum2.py`, which notches only the original's share:
   blend minus 0.8 x Adobe), not just the low ones.
 
+### A remote two-person podcast: Databased (Restream, November 2026)
+
+Jamie and James on Restream, edited from Liz's Dropbox folder
+(`convex-videos/databased-s2e7/`): the Restream composite mp4 (its layout,
+tweets and branding already in), a mixed m4a, and each person's own mic
+file.
+
+- **Use each person's own mic, never the composite's sound.** The Restream
+  mix clipped about 55,000 samples (+3.1 dBFS) where James leaned into the
+  mic, and Mike heard it "blow out"; the separate mic files barely clipped
+  and don't bleed into each other. Put them on Voice and Voice 2, mute the
+  composite, `normalizeSpeech` (it adds the compressor and limiter). Do it
+  in the first cut, not after he hears it.
+- **Sync the mics with `tandem sync`, then check them against the picture.**
+  Since mikecann/tandem#105 it places each mic (a second one on "Voice 2")
+  at the right offset (S2E7: James +4.4154 s, Jamie +4.4171 s). Before
+  that it was 151 ms out on this mp4, and an ffmpeg cross-correlation by
+  hand was 44 ms out the other way: ffmpeg keeps an AAC .m4a's 2112-sample
+  encoder padding at the start and Tandem drops it. So don't measure
+  offsets in ffmpeg. The check that settles it: `tandem clip T T+30
+  --tracks Voice --audio-only`, cross-correlated with the camera file's own
+  audio at the same source time, should be within a few ms.
+- **Restream's picture has no webcam lag:** `tandem sync 0` on the mp4.
+- **Keep what the founders say.** Swears, other companies named, Convex's
+  own incidents: it's their podcast, so it stays unless they say in the
+  episode to cut it (Mike, 9 Nov 2026). Cut the pre-show and their asides
+  to the editor ("Mike, just cut around this"), and keep the pacing loose.
+- **Read a restart before cutting it.** On S2E7 the only spoken
+  description of the first tweet sat inside a false start, so audio-only
+  listeners never heard what it was about until it went back in.
+- **The rest of the episode** (intro card, thumbnail, YouTube, the ~30 s
+  social cut and how Mike wanted it to look) is in
+  `convex-videos/databased/README.md`.
+
 ## Rules
 
 - Insert at a cut's exact time, read from the clips (`start + duration`),
@@ -1291,7 +1632,9 @@ comments, changed these rules for a conversation like this:
 - To use a voice cleaned up outside Tandem (a de-reverb, DeepFilterNet),
   swap the file under the clips with `tandem media replace <media id>
   <file>`, not by placing it again. It checks the length matches within
-  a frame and makes the loudness and transcript again from the new file;
+  a frame and that it starts at the same moment by sound (an ffmpeg copy
+  of an .m4a is 44 ms long at the start: trim the start, as it says, never
+  the end), and makes the loudness and transcript again from the new file;
   the James interview's swap through a bare `updateMedia` path kept the
   old file's loudness, 3 dB out, before Tandem dropped the fingerprint
   itself (30 Oct 2026). Don't `tandem media --refresh` in between.

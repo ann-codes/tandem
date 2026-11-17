@@ -758,6 +758,122 @@ final class EditorBehaviourTests: XCTestCase {
         XCTAssertEqual(editor.x(at: 40), playhead, accuracy: 1)
     }
 
+    func testTheSpeedMenuSetsWhatSpacePlaysAtAndChangesItWhilePlaying() {
+        let playback = editor.model.playback
+        playback.setSpeed(1.5)
+        XCTAssertFalse(playback.isPlaying, "picking a speed while paused doesn't start it")
+        editor.press("space")
+        XCTAssertEqual(playback.rate, 1.5)
+        let started = playback.time
+        editor.wait(for: "playing on at 1.5×") { playback.time > started + t(0.3) }
+        playback.setSpeed(0.75)
+        XCTAssertEqual(playback.rate, 0.75, "a new speed takes over while it plays")
+        editor.press("space")
+        XCTAssertFalse(playback.isPlaying)
+        editor.press("l")
+        XCTAssertEqual(playback.rate, 1, "L still shuttles from 1×")
+        editor.press("l")
+        XCTAssertEqual(playback.rate, 2)
+        editor.press("k")
+        editor.press("j")
+        playback.setSpeed(1.25)
+        XCTAssertEqual(playback.rate, -1, "playing backwards is left alone")
+        editor.press("k")
+        XCTAssertEqual(PlaybackController.label(0.75), "0.75×")
+        XCTAssertEqual(PlaybackController.label(2), "2×")
+        XCTAssertEqual(PlaybackController.label(-4), "−4×")
+    }
+
+    /// At the transport's speeds the viewer stretches the sound itself (so
+    /// voices don't go robotic) and plays it at 1x while the picture runs
+    /// at the speed: the two still keep time.
+    func testAtAPlaybackSpeedTheStretchedSoundKeepsTimeWithThePicture() throws {
+        let editor = try soundEditor()
+        let playback = editor.model.playback
+        editor.click(editor.rulerPoint(at: 4))
+        playback.setSpeed(1.5)
+        editor.wait(for: "the sound queued, stretched for 1.5x") {
+            playback.audio.isReady(at: playback.time, reverse: false, stretch: 1.5)
+        }
+        editor.press("space")
+        let started = playback.time
+        editor.wait(for: "picture and sound playing at 1.5x") {
+            playback.time > started + t(1.5) && playback.audio.isPlaying
+        }
+        assertInStep(playback, "at 1.5x")
+        XCTAssertEqual(playback.audio.currentStretch, 1.5)
+        XCTAssertEqual(CMTimebaseGetRate(playback.audio.synchronizer.timebase), 1, accuracy: 0.001, "stretched sound plays at 1x")
+        // L from there shuttles at 3x, unstretched, as shuttles always were.
+        editor.press("l")
+        XCTAssertEqual(playback.rate, 3)
+        editor.wait(for: "the 3x shuttle playing") { playback.audio.isPlaying && playback.audio.currentStretch == 1 }
+        editor.settle(0.35)
+        assertInStep(playback, "shuttling at 3x, unstretched")
+        editor.press("k")
+
+        // A shuttle that lands on the chosen speed is still a shuttle: with
+        // the speed at 2x, L's 1x to 2x changes speed on the fly, unstretched.
+        playback.setSpeed(2)
+        editor.press("l")
+        editor.wait(for: "the 1x shuttle playing") { playback.audio.isPlaying }
+        editor.settle(0.35)
+        let starts = DrawTiming.samples("playback starts").count
+        editor.press("l")
+        XCTAssertEqual(playback.rate, 2)
+        editor.settle(0.35)
+        XCTAssertEqual(playback.audio.currentStretch, 1)
+        XCTAssertEqual(DrawTiming.samples("playback starts").count, starts, "L to 2x started playback again")
+        assertInStep(playback, "shuttling at 2x with the speed at 2x")
+        editor.press("k")
+        playback.setSpeed(1)
+    }
+
+    /// The speed badge on the play button is always there, 1× included,
+    /// and a click on it opens the speeds; picking one sets what Space plays
+    /// at, and the badge says so.
+    func testTheSpeedBadgeShowsTheSpeedAndAClickOpensTheSpeeds() throws {
+        let playback = editor.model.playback
+        editor.settle(0.3)
+        // A SwiftUI menu has no AppKit view of its own, only the focus
+        // proxy SwiftUI puts over each control: the badge's is the small one
+        // over the play button's top right corner.
+        func badge() throws -> CGPoint {
+            var proxies: [NSRect] = []
+            func walk(_ view: NSView) {
+                if String(describing: type(of: view)).contains("KeyViewProxy") { proxies.append(view.convert(view.bounds, to: nil)) }
+                view.subviews.forEach(walk)
+            }
+            walk(editor.window.contentView!)
+            let play = try XCTUnwrap(proxies.first { abs($0.width - 32) < 1 && abs($0.height - 32) < 1 }, "the play button")
+            let found = try XCTUnwrap(proxies.first { $0.height < 20 && $0.minX > play.midX && $0.minX < play.maxX && $0.maxY > play.maxY }, "a speed badge on the play button")
+            return CGPoint(x: found.midX, y: editor.window.contentView!.bounds.height - found.midY)
+        }
+        let at = try badge()
+        // The click opens the menu, which runs its own loop until it's
+        // closed: picked from inside it, as a click on 1.5× would.
+        var titles: [String] = []
+        let opened = NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: nil) { note in
+            guard let menu = note.object as? NSMenu else { return }
+            let timer = Timer(timeInterval: 0.1, repeats: false) { _ in
+                MainActor.assumeIsolated {
+                    titles = menu.items.map(\.title)
+                    if let index = menu.items.firstIndex(where: { $0.title == "1.5×" }) { menu.performActionForItem(at: index) }
+                    menu.cancelTracking()
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+        }
+        defer { NotificationCenter.default.removeObserver(opened) }
+        editor.click(at)
+        editor.settle(0.3)
+        XCTAssertEqual(titles.filter { $0.hasSuffix("×") }, ["0.5×", "0.75×", "1×", "1.25×", "1.5×", "1.75×", "2×"])
+        XCTAssertEqual(playback.speed, 1.5)
+        editor.press("space")
+        XCTAssertEqual(playback.rate, 1.5)
+        editor.press("space")
+        playback.setSpeed(1)
+    }
+
     func testRulerClickWhilePlayingJumpsAndKeepsPictureAndSoundPlaying() throws {
         let editor = try soundEditor()
         let playback = editor.model.playback
@@ -1240,7 +1356,7 @@ final class EditorBehaviourTests: XCTestCase {
     func testExportingKeepsTheMacAwakeUntilItsDone() {
         XCTAssertFalse(systemSleepHeld(), "nothing held before exporting")
         // A small timeline of its own, through the window's export queue as
-        // the Export button sends it: the harness's media are only names.
+        // the export sheet sends it: the harness's media are only names.
         let black = Clip(content: .solid(color: .black), start: .zero, duration: t(3))
         let project = Project(name: "Awake", settings: ProjectSettings(width: 320, height: 180), videoTracks: [Track(kind: .video, name: "V1", clips: [black])])
         let preset = ExportPreset(name: "Test", codec: .h264, videoBitrate: 2_000_000, loudnessTarget: nil, truePeakCeiling: nil)
@@ -1549,7 +1665,7 @@ final class EditorBehaviourTests: XCTestCase {
         editor.settle(0.3)
         let badges = editor.controller.hintBoard.badges.values
         let symbols = Set(badges.map(\.symbol))
-        for expected in ["C", "V", "S", "Space", "⌘E"] {
+        for expected in ["C", "V", "S", "Space"] {
             XCTAssertTrue(symbols.contains(expected), "\(expected) in \(symbols.sorted())")
         }
         let bounds = editor.window.contentView?.bounds ?? .zero
@@ -1579,4 +1695,98 @@ final class EditorBehaviourTests: XCTestCase {
         XCTAssertEqual(editor.clip("B-roll").end.seconds, 32, accuracy: 0.1, "held past the end")
         XCTAssertNotNil(editor.project.heldStretches(of: editor.clip("B-roll")).tail)
     }
+
+    // MARK: - The top of the window
+
+    /// There's no bar across the top any more. Its 40 points go to the
+    /// viewer and inspector, and the timeline stays the height it was, also
+    /// for someone who has dragged the split and has it saved.
+    func testTheTopOfTheWindowGoesToTheViewerAndNotTheTimeline() throws {
+        let saved = PanelSizes.load()
+        defer { saved.save() }
+        var sizes = saved
+        sizes.workspaceHeight = 480
+        sizes.save()
+        let harness = try EditorHarness()
+        defer { harness.close() }
+
+        let viewer = try XCTUnwrap(harness.view(ViewerView.self))
+        let viewerTop = harness.windowPoint(CGPoint(x: 0, y: viewer.isFlipped ? 0 : viewer.bounds.maxY), in: viewer).y
+        XCTAssertEqual(viewerTop, 0, accuracy: 0.5, "the viewer runs to the top of the window")
+        XCTAssertEqual(viewer.bounds.height, Theme.Metrics.titleStripHeight + 480 - Theme.Metrics.transportHeight, accuracy: 0.5)
+
+        // The timeline starts where it always did: under the old bar, the
+        // saved workspace, the divider and its toolbar.
+        let timeline = try XCTUnwrap(harness.view(TimelineContainerView.self))
+        let timelineTop = harness.windowPoint(CGPoint(x: 0, y: timeline.isFlipped ? 0 : timeline.bounds.maxY), in: timeline).y
+        XCTAssertEqual(timelineTop, Theme.Metrics.titleStripHeight + 480 + 1 + Theme.Metrics.timelineToolbarHeight, accuracy: 0.5)
+    }
+
+    func testTheInspectorTabsAtTheTopOfTheWindowTakeClicks() throws {
+        XCTAssertNotEqual(editor.model.inspectorTab, .activity)
+        let tab = try XCTUnwrap(editor.point(ofTip: "Activity:"))
+        XCTAssertLessThan(tab.y, Theme.Metrics.titleStripHeight, "the tab row is at the very top")
+        editor.click(tab)
+        XCTAssertEqual(editor.model.inspectorTab, .activity)
+    }
+
+    /// The media strip, the margin over the viewer and the empty part of
+    /// the inspector's tab row move the window, as the bar did.
+    func testTheTopOfTheWindowStillMovesIt() throws {
+        let width = try XCTUnwrap(editor.window.contentView).bounds.width
+        for start in [CGPoint(x: 200, y: 20), CGPoint(x: width / 2, y: 6), CGPoint(x: width - 6, y: 20)] {
+            let before = editor.window.frame.origin
+            editor.drag(start, to: CGPoint(x: start.x + 30, y: start.y + 12))
+            XCTAssertEqual(editor.window.frame.origin.x, before.x + 30, accuracy: 0.5, "dragging from \(start)")
+            XCTAssertEqual(editor.window.frame.origin.y, before.y - 12, accuracy: 0.5, "dragging from \(start)")
+        }
+    }
+
+    /// A side divider grabs from the bottom of the titlebar band down: in
+    /// the band the system moves the window, whatever's on top of it.
+    func testTheSideDividersStartGrabbingBelowTheTitlebarBand() throws {
+        let media = try XCTUnwrap(editor.point(ofTip: "Drag to resize the media panel"))
+        XCTAssertGreaterThanOrEqual(media.y, Theme.Metrics.titleStripHeight, "the media panel's is below the band")
+        let inspector = try XCTUnwrap(editor.point(ofTip: "Drag to resize the inspector"))
+        XCTAssertGreaterThanOrEqual(inspector.y, Theme.Metrics.titleStripHeight, "the inspector's too")
+    }
+
+    /// The name's tooltip says which file it is, now the path isn't shown,
+    /// and full screen doesn't keep a gap where the traffic lights were.
+    func testTheStripNamesTheProjectAndClosesUpInFullScreen() throws {
+        let name = try XCTUnwrap(editor.point(ofTip: editor.model.shortPath), "the file's path is the name's tooltip")
+        editor.model.windowIsFullScreen = true
+        editor.settle()
+        let inFullScreen = try XCTUnwrap(editor.point(ofTip: editor.model.shortPath))
+        XCTAssertLessThan(inFullScreen.x, name.x - 40, "no gap for the lights")
+    }
+
+    /// The buttons have gone; File > Export… and its key still open the sheet.
+    func testExportOpensFromTheMenuBarAndTheKeyboard() throws {
+        XCTAssertNil(editor.point(ofTip: "Export the video"), "no Export button")
+        let keymap = editor.controller.keymap
+        let main = MainMenu.build(keymap: keymap, recentDelegate: ExportMenuDelegate())
+        let file = try XCTUnwrap(main.item(withTitle: "File")?.submenu)
+        let item = try XCTUnwrap(file.items.first { MainMenu.command(of: $0) == .export })
+        XCTAssertEqual(item.title, "Export…")
+        XCTAssertEqual(item.keyEquivalent, "e")
+        XCTAssertTrue(editor.controller.validateMenuItem(item))
+        editor.controller.performEditorCommand(item)
+        XCTAssertTrue(editor.model.showExportSheet)
+
+        editor.model.showExportSheet = false
+        editor.settle()
+        editor.press("cmd+e")
+        XCTAssertTrue(editor.model.showExportSheet)
+    }
+
+    /// The chip's tooltip was the only lasting sign the API hadn't started.
+    func testTheStatusBarSaysWhenTheLocalAPICouldntStart() {
+        XCTAssertNil(editor.point(ofTip: "The local API couldn't start"), "nothing while it's fine")
+        editor.model.apiProblem = "the port is taken"
+        editor.settle()
+        XCTAssertNotNil(editor.point(ofTip: "The local API couldn't start: the port is taken"))
+    }
 }
+
+private final class ExportMenuDelegate: NSObject, NSMenuDelegate {}

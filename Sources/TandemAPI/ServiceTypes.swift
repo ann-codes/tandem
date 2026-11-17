@@ -83,6 +83,10 @@ public struct StatusResult: Codable, Sendable {
     /// from the file for this call.
     public var headless: Bool
     public var jobs: [JobStatus]
+    /// Headless only: analysis the project needs that isn't made yet.
+    /// Nothing makes it until the app, `tandem serve` or a `tandem wait`
+    /// opens the project, so `jobs` alone would read as all done.
+    public var unmade: [WaitItem]?
     public var exports: [ExportJob]
     /// True when the project was recovered from the journal after a crash.
     public var recoveredEdits: Bool
@@ -441,6 +445,62 @@ public enum PauseKind: String, Codable, Sendable {
     case sentence, comma, mid
 }
 
+/// What a pause is, as `tighten --filmora` cuts it: read from the words
+/// either side by the agent doing the edit, since Bark puts a full stop
+/// wherever Mike pauses ("call this. functions", "halfway through. You
+/// don't end up"). Each kind keeps its own total gap, speech end to speech
+/// start, from Mike's comments and his own trims (Convex Auth v2 and
+/// Threadbear launch, Nov 2026): mid-sentence "should just sound like there
+/// was no pause", between sentences "a pause is more natural", and "an
+/// intentional long pause where I'm showing something on the screen".
+public enum FilmoraKind: String, Codable, Sendable, CaseIterable {
+    /// Inside a phrase: no pause heard.
+    case mid
+    /// A clause boundary: a comma, before and/but/so/because/which/if, a
+    /// list item.
+    case clause
+    /// Between sentences in the same train of thought.
+    case sentence
+    /// A new topic or paragraph: Filmora's 0.4 s each side.
+    case topic
+    /// Deliberate (a scripted beat, a demo action on screen): left alone.
+    case keep
+
+    /// The whole gap kept, speech end to speech start. Nil: left alone.
+    public var total: Double? {
+        switch self {
+        case .mid: return 0.12
+        case .clause: return 0.2
+        case .sentence: return 0.4
+        case .topic: return 0.8
+        case .keep: return nil
+        }
+    }
+}
+
+/// The kind of the pause holding `at`, as the agent read it.
+public struct PauseKindMark: Codable, Equatable, Sendable {
+    public var at: Time
+    public var kind: FilmoraKind
+    public init(at: Time, kind: FilmoraKind) {
+        self.at = at
+        self.kind = kind
+    }
+}
+
+/// A pause `tighten --filmora` found: where, the words either side, the
+/// kind it guessed and the kind it was given.
+public struct FilmoraPause: Codable, Equatable, Sendable {
+    public var start: Time
+    public var end: Time
+    /// From speech end to speech start: the gap as it's heard now.
+    public var heard: Time
+    public var before: String
+    public var after: String
+    public var guess: FilmoraKind
+    public var kind: FilmoraKind?
+}
+
 public struct TightenRequest: ServiceCall {
     public static let operation = ServiceOperation.tighten
     /// Pauses at least this long get shortened. Default 0.6 s, or 0.5 s for
@@ -460,11 +520,37 @@ public struct TightenRequest: ServiceCall {
     public var midMin: Double?
     /// Mike's rules (`TranscriptTools.mikeRules`); the other fields override them.
     public var mike: Bool?
+    /// Cut by volume, as Mike's old Filmora silence detection did
+    /// (`VolumeTightening`): every silence of at least `min` (0.5 s) under
+    /// `threshold` (-35 dB) keeps `buffer` (0.4 s) at each end. Not with
+    /// the transcript's keeps (`keep`, `sentence`, `comma`, `mid`, `midMin`,
+    /// `mike`) or `widen`.
+    public var filmora: Bool?
+    /// With `filmora`: peak level in dBFS under which the take is silent.
+    public var threshold: Double?
+    /// With `filmora`: what each silence keeps at each end.
+    public var buffer: Double?
+    /// With `filmora`: the shortest clip a cut may leave; a shorter one
+    /// gets a pause of a second or less beside it put back. 0 for none.
+    public var minClip: Double?
+    /// With `filmora`: what each pause is, by a time in it. `apply` needs
+    /// one for every pause the dry run lists.
+    public var kinds: [PauseKindMark]?
     /// Pauses containing any of these timeline times are left alone.
     public var protect: [Time]?
     /// Widen joins between speech clips that leave less than the keep, from
     /// silence in the take either side.
     public var widen: Bool?
+    /// What each cut leaves before the word after it, in seconds
+    /// (`LeadIn`, default 0.05): the rest of the pause goes after the word
+    /// before, so the clip coming in starts a frame or two before Mike
+    /// speaks.
+    public var lead: Double?
+    /// Cut nothing: roll the take's existing joins so each clip starts
+    /// `lead` before its first word and the pause before it goes on the end
+    /// of the clip before (`LeadRoll`), for an edit cut before tighten did
+    /// that itself. Only `lead`, `from` and `to` go with it.
+    public var leadOnly: Bool?
     /// Make the edit. Without it this is a dry run that returns the plan.
     public var apply: Bool?
     public var from: Time?
@@ -476,10 +562,13 @@ public struct TightenRequest: ServiceCall {
 
     public init(
         min: Double? = nil, keep: Double? = nil, sentence: Double? = nil, comma: Double? = nil, mid: Double? = nil,
-        midMin: Double? = nil, mike: Bool? = nil, protect: [Time]? = nil, widen: Bool? = nil,
+        midMin: Double? = nil, mike: Bool? = nil, filmora: Bool? = nil, threshold: Double? = nil, buffer: Double? = nil, minClip: Double? = nil, kinds: [PauseKindMark]? = nil,
+        protect: [Time]? = nil, widen: Bool? = nil, lead: Double? = nil, leadOnly: Bool? = nil,
         apply: Bool? = nil, from: Time? = nil, to: Time? = nil,
         label: String? = nil, author: String? = nil, expectedRevision: Int? = nil
     ) {
+        self.lead = lead
+        self.leadOnly = leadOnly
         self.min = min
         self.keep = keep
         self.sentence = sentence
@@ -487,6 +576,11 @@ public struct TightenRequest: ServiceCall {
         self.mid = mid
         self.midMin = midMin
         self.mike = mike
+        self.filmora = filmora
+        self.threshold = threshold
+        self.buffer = buffer
+        self.minClip = minClip
+        self.kinds = kinds
         self.protect = protect
         self.widen = widen
         self.apply = apply
@@ -506,8 +600,15 @@ public struct TightenRequest: ServiceCall {
         mid = try c.decodeSeconds(.mid)
         midMin = try c.decodeSeconds(.midMin)
         mike = try c.decodeIfPresent(Bool.self, forKey: .mike)
+        filmora = try c.decodeIfPresent(Bool.self, forKey: .filmora)
+        threshold = try c.decodeIfPresent(Double.self, forKey: .threshold)
+        buffer = try c.decodeSeconds(.buffer)
+        minClip = try c.decodeSeconds(.minClip)
+        kinds = try c.decodeIfPresent([PauseKindMark].self, forKey: .kinds)
         protect = try c.decodeTimes(.protect)
         widen = try c.decodeIfPresent(Bool.self, forKey: .widen)
+        lead = try c.decodeSeconds(.lead)
+        leadOnly = try c.decodeIfPresent(Bool.self, forKey: .leadOnly)
         apply = try c.decodeIfPresent(Bool.self, forKey: .apply)
         from = try c.decodeTime(.from)
         to = try c.decodeTime(.to)
@@ -535,8 +636,13 @@ public struct PlannedCut: Codable, Equatable, Sendable {
     /// the track it's worst on. Set when the cut was placed from the sound.
     public var startEdge: CutJoinSide?
     public var endEdge: CutJoinSide?
+    /// With `filmora`: the pause's kind, and whether it's only a guess.
+    public var spoken: FilmoraKind?
+    public var guessed: Bool?
 
-    public init(pause: Pause, cut: TimeRange, kind: PauseKind? = nil, keep: Time? = nil, startEdge: CutJoinSide? = nil, endEdge: CutJoinSide? = nil) {
+    public init(pause: Pause, cut: TimeRange, kind: PauseKind? = nil, keep: Time? = nil, startEdge: CutJoinSide? = nil, endEdge: CutJoinSide? = nil, spoken: FilmoraKind? = nil, guessed: Bool? = nil) {
+        self.spoken = spoken
+        self.guessed = guessed
         self.pause = pause
         self.cut = cut
         self.kind = kind
@@ -588,6 +694,20 @@ public struct PlannedWiden: Codable, Equatable, Sendable {
     public var added: Time { tail + head }
 }
 
+/// One join of the take `tighten --lead-only` looked at.
+public struct LeadJoin: Codable, Equatable, Sendable {
+    /// Where the two clips meet, before the roll.
+    public var at: Time
+    /// How long the clip coming in ran before his first word's sound.
+    public var wait: Time
+    /// How far the cut moves later, on whole frames. Nil when it waits no
+    /// longer than the lead, or there's no quiet after the clip before to
+    /// grow into.
+    public var roll: Time?
+    /// The first words said after it.
+    public var words: String
+}
+
 public struct TightenResult: Codable, Sendable {
     /// The revision the plan was made against.
     public var revision: Int
@@ -602,6 +722,21 @@ public struct TightenResult: Codable, Sendable {
     public var comma: Time?
     public var mid: Time?
     public var midMinimum: Time?
+    /// Set when cutting by volume (`filmora`): what each silence keeps at
+    /// each end, and the level under which the take is silent.
+    public var buffer: Time? = nil
+    public var threshold: Double? = nil
+    /// With `filmora`: the shortest clip a cut may leave, and the pauses
+    /// put back for it.
+    public var minClip: Time? = nil
+    public var putBack: [Pause] = []
+    /// With `filmora`: every pause it found, with its guessed and given kind.
+    public var pauses: [FilmoraPause]? = nil
+    /// What each join leaves before the word after it (`lead`).
+    public var lead: Time? = nil
+    /// With `leadOnly`: every join of the take looked at, how long its clip
+    /// ran before his first word and how far its cut rolls.
+    public var leads: [LeadJoin]? = nil
     public var cuts: [PlannedCut]
     /// Joins widened back out (`widen`).
     public var widened: [PlannedWiden]
@@ -637,6 +772,13 @@ extension TightenResult {
         comma = try c.decodeIfPresent(Time.self, forKey: .comma)
         mid = try c.decodeIfPresent(Time.self, forKey: .mid)
         midMinimum = try c.decodeIfPresent(Time.self, forKey: .midMinimum)
+        buffer = try c.decodeIfPresent(Time.self, forKey: .buffer)
+        threshold = try c.decodeIfPresent(Double.self, forKey: .threshold)
+        minClip = try c.decodeIfPresent(Time.self, forKey: .minClip)
+        putBack = try c.decodeIfPresent([Pause].self, forKey: .putBack) ?? []
+        pauses = try c.decodeIfPresent([FilmoraPause].self, forKey: .pauses)
+        lead = try c.decodeIfPresent(Time.self, forKey: .lead)
+        leads = try c.decodeIfPresent([LeadJoin].self, forKey: .leads)
         cuts = try c.decode([PlannedCut].self, forKey: .cuts)
         widened = try c.decode([PlannedWiden].self, forKey: .widened)
         protected = try c.decode([Pause].self, forKey: .protected)
@@ -701,7 +843,17 @@ public struct ApplyRequest: ServiceCall {
     }
 
     public func run(on service: TandemService, context: CallContext) async throws -> ApplyResult {
-        try service.apply(self, context: context)
+        var result = try service.apply(self, context: context)
+        guard !result.dryRun, !result.repeated else { return result }
+        // A levelled clip heard from a file nobody's measured plays at the
+        // file's own level, so it's measured now (with the app closed
+        // nothing else would), and what can't be is said. Every heard one,
+        // not only the clips this changed: unmuting a track makes its clips
+        // heard without changing them. Usually there are none, so it's free.
+        let unmeasured = TandemService.unlevelled(in: service.coordinator.project, analysis: service.analysis)
+            .filter { FileManager.default.fileExists(atPath: service.folder.url(for: $0.item).path) }
+        result.warnings += TandemService.unlevelledWarnings(await service.measure(unmeasured))
+        return result
     }
 }
 

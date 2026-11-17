@@ -100,6 +100,9 @@ public final class MediaAnalysisSource: AnalysisSource, @unchecked Sendable {
             custom.matteMode = mode
             settings = custom
         }
+        // A matte is ready for the edit once the stretches its clips play
+        // are, though the rest of the file is still being made.
+        if need.kind == .matte { return analysis.matteState(for: item, settings: settings, spans: need.matteSpans) }
         return analysis.state(need.kind, for: item, settings: settings)
     }
 }
@@ -107,8 +110,8 @@ public final class MediaAnalysisSource: AnalysisSource, @unchecked Sendable {
 /// A rendered frame and what the renderer couldn't do as the project asks.
 public struct RenderedFrame: Sendable {
     public var png: Data
-    /// For example "No cutout matte for source/take-camera.mov yet, showing
-    /// the full frame."
+    /// For example "No cutout matte for source/take-camera.mov yet (clip
+    /// clip_k3f9x2mq), showing the full frame."
     public var warnings: [String]
 
     public init(png: Data, warnings: [String] = []) {
@@ -179,7 +182,8 @@ public struct DefaultRenderBackend: RenderBackend {
         output: URL,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> RenderedExport {
-        let exporter = Exporter(context: context, preset: preset, output: output)
+        // Agents export through here, and Mike isn't waiting on those.
+        let exporter = Exporter(context: context, preset: preset, output: output, qos: .utility)
         let result = try await exporter.run(progress: progress)
         return RenderedExport(result: result, warnings: exporter.warnings)
     }
@@ -188,8 +192,11 @@ public struct DefaultRenderBackend: RenderBackend {
 /// Picks the render warnings that matter for part of the timeline. The
 /// renderer warns about the whole project (every file still missing its
 /// cutout matte, say), so a frame at 2:00 only keeps the lines about media
-/// and clips that play around then. Lines that name no media or clip are
-/// always kept. Repeats are dropped.
+/// and clips that play around then. A line that names a clip goes by the
+/// clip alone, even when it names its file too: a take matted stretch by
+/// stretch has clips cut out and clips not yet, and a frame of one that
+/// is shouldn't warn about one that isn't. Lines that name no media or clip
+/// are always kept. Repeats are dropped.
 public enum RenderWarnings {
     public static func relevant(_ warnings: [String], in project: Project, range: TimeRange?) -> [String] {
         var seen = Set<String>()
@@ -203,8 +210,9 @@ public enum RenderWarnings {
         return unique.filter { line in
             let mentionedClips = clips.map(\.id).filter { line.contains($0) }
             let mentionedMedia = paths.filter { line.contains($0.1) }.map(\.0)
-            if mentionedClips.isEmpty && mentionedMedia.isEmpty { return true }
-            return mentionedClips.contains(where: playingIDs.contains) || mentionedMedia.contains(where: playingMedia.contains)
+            if !mentionedClips.isEmpty { return mentionedClips.contains(where: playingIDs.contains) }
+            if mentionedMedia.isEmpty { return true }
+            return mentionedMedia.contains(where: playingMedia.contains)
         }
     }
 }

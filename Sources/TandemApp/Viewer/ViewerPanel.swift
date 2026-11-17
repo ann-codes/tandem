@@ -11,6 +11,9 @@ struct ViewerPanel: View {
         VStack(spacing: 0) {
             ViewerRepresentable(model: model, zoom: $viewerZoom)
                 .overlay(alignment: .bottomLeading) { WalkthroughCard(model: model) }
+                // The viewer runs to the top of the window, so the margin
+                // over the picture is where it moves the window from.
+                .overlay(alignment: .top) { WindowDragArea().frame(height: CanvasGeometry.margin) }
             TransportBar(model: model, actions: actions, zoom: $viewerZoom)
         }
         .background(Theme.viewer.color)
@@ -54,8 +57,9 @@ struct TransportBar: View {
                 Text("/ " + Timecode.string(model.project.duration, rate: model.frameRate))
                     .font(.ui(12).monospacedDigit())
                     .foregroundStyle(Theme.textFainter.color)
-                if playback.isPlaying && abs(playback.rate) != 1 {
-                    Text(String(format: "%@%.0f×", playback.rate < 0 ? "−" : "", abs(playback.rate)))
+                // A J or L shuttle away from the chosen speed.
+                if playback.isPlaying && playback.rate != playback.speed {
+                    Text(PlaybackController.label(playback.rate))
                         .font(.ui(11, .semibold))
                         .foregroundStyle(Theme.amber.color)
                 }
@@ -75,6 +79,10 @@ struct TransportBar: View {
                         .background(Circle().fill(Theme.text.color))
                 }
                 .buttonStyle(.plain)
+                // The playback speed lives on the play button: a badge
+                // when it isn't 1×, and the speeds on a right-click.
+                .overlay(alignment: .topLeading) { SpeedBadge(playback: playback) }
+                .contextMenu { SpeedPicker(playback: playback) }
                 .tip(Shortcuts.help("Play or pause", .playPause) + ". J, K and L shuttle backwards, stop and forwards.")
                 .shortcutHint(.playPause, edge: .top)
                 TransportIcon(name: "forward.end.fill", help: Shortcuts.help("Next edit", .nextEdit), shortcut: .nextEdit) { actions.perform(.nextEdit) }
@@ -119,6 +127,55 @@ struct TransportBar: View {
         .padding(.horizontal, 16)
         .frame(height: Theme.Metrics.transportHeight)
         .overlay(alignment: .top) { Rectangle().fill(Theme.borderSubtle.color).frame(height: 1) }
+    }
+}
+
+/// The speeds Space and the play button can play at, as a checked list.
+private struct SpeedPicker: View {
+    let playback: PlaybackController
+
+    var body: some View {
+        Picker("Playback speed", selection: Binding(get: { playback.speed }, set: { playback.setSpeed($0) })) {
+            ForEach(PlaybackController.speeds, id: \.self) { speed in
+                Text(PlaybackController.label(speed)).tag(speed)
+            }
+        }
+        .pickerStyle(.inline)
+    }
+}
+
+/// The chosen speed on the play button's corner, always showing (1× too),
+/// so it's plain where the speed is set: a click opens the speeds. A
+/// right-click on the play button opens them as well.
+private struct SpeedBadge: View {
+    let playback: PlaybackController
+
+    var body: some View {
+        Menu {
+            SpeedPicker(playback: playback)
+        } label: {
+            Text(PlaybackController.label(playback.speed))
+                .font(.ui(9.5, .semibold).monospacedDigit())
+                // Quieter at 1×, so it's there without competing with the
+                // play button until a speed is chosen.
+                .foregroundStyle(playback.speed == 1 ? Theme.textMuted.color : Theme.text.color)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1)
+                .background(Capsule().fill(Theme.tabSelected.color))
+                .overlay(Capsule().stroke(Theme.controlBorder.color, lineWidth: 1))
+                .contentShape(Capsule())
+        }
+        // The plain button style keeps the capsule; the borderless menu
+        // style draws only the label's text.
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .tip("Playback speed for Space and the play button. The sound keeps its pitch.")
+        // Starts just inside the play button's right edge and grows
+        // rightwards, so 0.75× doesn't cover the play symbol; low enough to
+        // stay clear of the bar's top edge.
+        .offset(x: 22, y: -3)
     }
 }
 

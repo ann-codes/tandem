@@ -146,6 +146,14 @@ themselves for as long as they run. Don't start `tandem serve` just to get
 a transcript, and don't poll `tandem media` or `tandem status` in a sleep
 loop.
 
+`tandem status` with the app closed lists what isn't made yet ("Not made
+yet: transcript of source/restream.m4a (52:20.757); loudness and waveform of
+4 files"). Plain `tandem wait` makes all of it, which for an hour-long
+camera file nothing has transcribed is several minutes. After adding a few
+files, wait for those (`tandem wait --media med_x`), or don't wait at all:
+placing and levelling a file doesn't need its analysis. A wait that does
+the work itself first says what it's going to make.
+
 `tandem wait` blocks until the work is done, printing progress lines, and
 then says what finished:
 
@@ -153,7 +161,7 @@ then says what finished:
 tandem wait                         every background job
 tandem wait transcript              the transcripts the project makes
 tandem wait transcript --media med_x   one file's
-tandem wait matte                   mattes for clips with their cutout on
+tandem wait matte                   mattes for what clips with their cutout on play
 tandem wait proxy                   proxies for large video on the timeline
 tandem wait export                  exports running through the app or tandem serve
 ```

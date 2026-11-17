@@ -88,7 +88,7 @@ public enum Editing {
         case .moveClips(let clipIDs, let delta, let toTrackID, let includeLinked, let mode):
             try moveClips(&project, clipIDs, delta: delta ?? .zero, toTrackID: toTrackID, includeLinked: includeLinked ?? true, mode: mode ?? .place, &context)
         case .updateClip(let clipID, let patch):
-            try updateClip(&project, clipID, patch)
+            try updateClip(&project, clipID, patch, &context)
         case .link(let clipIDs):
             try link(&project, clipIDs, &context)
         case .unlink(let clipIDs):
@@ -440,7 +440,22 @@ public enum Editing {
         }
         guard let index = p.media.firstIndex(where: { $0.id == mediaID }) else { throw EditError.notFound("media \(mediaID)") }
         p.media[index] = item
+        // A take offset says where the file sits in its take; clips already
+        // placed keep playing the part of the file they did, so changing it
+        // moves nothing. Databased S2E7's mics were set 44 ms later this way
+        // and stayed where they were without a word.
+        let change = (item.takeOffset ?? .zero) - (old.takeOffset ?? .zero)
+        let placed = p.allTracks.flatMap(\.clips).filter { $0.mediaID == mediaID }
+        if item.takeID == old.takeID, item.takeID != nil, change != .zero, !placed.isEmpty {
+            let name = URL(fileURLWithPath: item.path).lastPathComponent
+            let ms = { (time: Time) in String(format: "%+.1f ms", time.seconds * 1000) }
+            context.warn("\(takeOffsetChanged) \(name) by \(ms(change)), but its \(placed.count == 1 ? "clip" : "\(placed.count) clips") on the timeline still play the same part of the file. To follow it, slip \(placed.count == 1 ? "it" : "each") by \(ms(.zero - change)) (includeLinked false), or remove \(placed.count == 1 ? "it" : "them") and placeSynced again.")
+        }
     }
+
+    /// How the warning above starts, so `tandem sync`, which moves a whole
+    /// take's offsets together, can leave it out.
+    public static let takeOffsetChanged = "Changed the take offset of"
 
     static func removeMedia(_ p: inout Project, _ mediaID: String) throws {
         guard let index = p.media.firstIndex(where: { $0.id == mediaID }) else { throw EditError.notFound("media \(mediaID)") }
@@ -869,6 +884,17 @@ public enum Editing {
             touched.insert(p[location].id)
         }
         for location in p.trackLocations where touched.contains(p[location].id) {
+            // A transition belongs to its clips, so it goes with them, but
+            // say so: a take's fade to black once sat on a 67 ms sliver at
+            // its end and went unnoticed when the sliver was tidied away.
+            let going = p[location].transitions.filter { t in
+                (t.fromClipID.map(idSet.contains) ?? false) || (t.toClipID.map(idSet.contains) ?? false)
+            }
+            for t in going {
+                let kept = [t.fromClipID, t.toClipID].compactMap { $0 }.first { !idSet.contains($0) }
+                let at = t.toClipID == nil ? "end" : t.fromClipID == nil ? "start" : "cut"
+                context.warn("The \(t.type.rawValue) at the \(at) of a removed clip on \"\(p[location].name)\" went with it\(kept == nil ? "; addTransition puts it back on the clip that ends there now" : "").")
+            }
             p[location].clips.removeAll { idSet.contains($0.id) }
             p[location].removeTransitions(referencing: idSet)
         }
@@ -1256,15 +1282,47 @@ public enum Editing {
         }
     }
 
-    static func updateClip(_ p: inout Project, _ clipID: String, _ patch: JSONValue) throws {
+    static func updateClip(_ p: inout Project, _ clipID: String, _ patch: JSONValue, _ context: inout EditContext) throws {
         let (location, index) = try requireClip(p, clipID)
         try requireUnlocked(p[location])
         try requireObject(patch, forbidden: ["id"], what: "clip")
-        let clip = try JSONValue.applyMergePatch(patch, to: p[location].clips[index])
+        let before = p[location].clips[index]
+        var clip = try JSONValue.applyMergePatch(patch, to: before)
+        // A clip's gain set before it was levelled (a bed's -31 dB from
+        // placing it) was chosen against the file as it is. Levelling to a
+        // loudness replaces that choice, so the old gain stacking on top
+        // silences the clip: Databased S2E7 and Convex 1.48 both exported
+        // with no music that way. Starting to level without saying a gain
+        // resets it; a gain in the same patch, or set later, is kept.
+        if before.audio?.normalizeTo == nil, clip.audio?.normalizeTo != nil,
+           let old = before.audio?.gainDB, old != 0, !patchSets(patch, "audio", "gainDB") {
+            clip.audio?.gainDB = 0
+            // A gain curve holds absolute values, so it moves down with its
+            // base: a duck stays the same depth under the new level.
+            if let keys = clip.keyframes["audio.gainDB"] {
+                clip.keyframes["audio.gainDB"] = keys.map { key in
+                    guard case .number(let value) = key.value else { return key }
+                    var moved = key
+                    moved.value = .number(value - old)
+                    return moved
+                }
+            }
+            context.warn("\(clip.name ?? clipID) had a \(AudioLevels.number(old)) dB gain from before it was levelled; that's reset to 0 so it plays at \(AudioLevels.number(clip.audio?.normalizeTo ?? 0)) LUFS. Set audio.gainDB with normalizeTo to keep a gain.")
+        }
         try checkContent(clip, fits: p[location], in: p)
         try checkSource(clip, in: p)
         p[location].clips[index] = clip
         p[location].sortClips()
+    }
+
+    /// Whether a merge patch names this key path, with any value.
+    private static func patchSets(_ patch: JSONValue, _ path: String...) -> Bool {
+        var value = patch
+        for key in path {
+            guard case .object(let object) = value, let next = object[key] else { return false }
+            value = next
+        }
+        return true
     }
 
     static func link(_ p: inout Project, _ clipIDs: [String], _ context: inout EditContext) throws {

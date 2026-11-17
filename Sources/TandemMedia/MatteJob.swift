@@ -65,7 +65,7 @@ enum MatteJob {
         let size = fittedSize(width: Int(reader.size.width), height: Int(reader.size.height), maxWidth: settings.matteMaxWidth, maxHeight: settings.matteMaxHeight)
         let writer = try makeWriter(reader: reader, width: size.width, height: size.height, folder: folder)
         let pipeline = try MattePipeline(reader: reader, width: size.width, height: size.height, settings: settings, workers: tuning.workers, stateless: tuning.stateless)
-        pipeline.start()
+        pipeline.start(qos: context.qos)
         await context.acquireEncoder()
         do {
             while true {
@@ -86,6 +86,22 @@ enum MatteJob {
             writer.cancel()
             throw error
         }
+    }
+
+    /// Before a matte of a stretch (`MatteSpans`): a frame of nothing at
+    /// zero, held until the stretch starts. Without it AVFoundation reads
+    /// the first frame back at zero and the whole matte four seconds early
+    /// (or however late the stretch starts); with it the matte keeps the
+    /// file's own times, as the composition reads it. Nothing shows it: a
+    /// stretch's matte only serves clips inside the stretch.
+    static func leadIn(before time: CMTime, width: Int, height: Int, into writer: EncodedMovieWriter) throws {
+        guard time > .zero else { return }
+        var blank: CVPixelBuffer?
+        CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                            [kCVPixelBufferIOSurfacePropertiesKey: [String: Any]()] as CFDictionary, &blank)
+        guard let blank else { throw MediaError.failed("Out of memory for matte frames") }
+        MatteBlender.copy([UInt8](repeating: 0, count: width * height), width: width, height: height, into: blank)
+        try writer.append(blank, at: .zero)
     }
 
     /// The matte movie's encoder, for either model.
@@ -156,15 +172,17 @@ final class MattePipeline: @unchecked Sendable {
         smoother = settings.matteSmoothing == .steady ? MatteSmoother(width: width, height: height) : nil
     }
 
-    func start() {
+    /// The decode and Vision threads run at the job's QoS (`JobContext.qos`),
+    /// so a matte nobody is waiting on stays in the background.
+    func start(qos: DispatchQoS.QoSClass) {
         let decoder = Thread { [self] in decodeLoop() }
         decoder.name = "tandem.matte.decode"
-        decoder.qualityOfService = .utility
+        decoder.qualityOfService = qos.threadQoS
         decoder.start()
         for index in 0..<workerCount {
             let worker = Thread { [self] in workLoop() }
             worker.name = "tandem.matte.vision.\(index)"
-            worker.qualityOfService = .utility
+            worker.qualityOfService = qos.threadQoS
             worker.start()
         }
     }
@@ -298,6 +316,7 @@ final class MattePipeline: @unchecked Sendable {
         }
         guard let output else { throw MediaError.failed("Out of memory for matte frames") }
         MatteBlender.copy(matte, width: width, height: height, into: output)
+        if written == 0 { try MatteJob.leadIn(before: time, width: width, height: height, into: writer) }
         try writer.append(output, at: time)
         written += 1
     }

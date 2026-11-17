@@ -36,7 +36,10 @@ extension StatusResult: ReadableResult {
             lines.append("  things to look at, handed back and not yet watched: \(handback.count) (\(names.joined(separator: "; ")))")
         }
         let active = jobs.filter { $0.state == .queued || $0.state == .running }
-        if active.isEmpty {
+        if active.isEmpty, let unmade, !unmade.isEmpty {
+            lines.append("  background jobs: none running, since nothing has it open. Not made yet: \(WaitItem.summary(unmade)).")
+            lines.append("    `tandem wait` makes them now (a long take's transcript takes minutes), or opening the project in the app does.")
+        } else if active.isEmpty {
             lines.append("  background jobs: none")
         } else {
             lines.append("  background jobs:")
@@ -237,17 +240,23 @@ extension TightenResult {
 
 extension TightenResult: ReadableResult {
     public var readableText: String {
+        if let leads { return leadsText(leads) }
         var lines: [String] = []
         let mode = applied == nil ? "dry run" : "applied"
         let bySentence = sentence != nil || comma != nil || mid != nil
+        let settings = buffer.map { _ in "silences under \(Int((threshold ?? -35).rounded())) dB of \(TimeText.duration(minimum)) or more, by kind: mid 0.12 s, clause 0.2 s, sentence 0.4 s, topic 0.8 s, keep left alone" }
         if cuts.isEmpty && widened.isEmpty {
-            if bySentence {
+            if let settings {
+                lines.append("Nothing to cut: no \(settings) would lose a frame.")
+            } else if bySentence {
                 lines.append("Nothing to tighten: keeping \(keepsText), no pause would lose a frame.")
             } else {
                 lines.append("Nothing to tighten: no pauses of \(TimeText.duration(minimum)) or more that would lose a frame.")
             }
         } else {
-            if bySentence {
+            if let settings {
+                lines.append("Cut \(cuts.count) of \(pauses?.count ?? cuts.count) pause\(cuts.count == 1 ? "" : "s"), \(settings) (\(mode), revision \(revision)):")
+            } else if bySentence {
                 let midMinimum = midMinimum.map { ", comma and mid-sentence ones of \(TimeText.duration($0)) or more" } ?? ""
                 lines.append("Keep \(keepsText) (sentence pauses of \(TimeText.duration(minimum)) or more\(midMinimum); \(mode), revision \(revision)):")
             } else {
@@ -263,7 +272,9 @@ extension TightenResult: ReadableResult {
                     ranges.append("\(cuts[index].cut.start)-\(cuts[index].cut.end)")
                 }
                 index += 1
-                let kind = bySentence ? (cut.kind.map { " \($0.rawValue)" } ?? "") : ""
+                let kind = buffer != nil
+                    ? (cut.spoken.map { " \($0.rawValue)\(cut.guessed == true ? " (guess)" : "")" } ?? "")
+                    : bySentence ? (cut.kind.map { " \($0.rawValue)" } ?? "") : ""
                 // Sound left in beside the cut is worth a listen.
                 let beside = cut.pause.sound.flatMap { $0.heard.isEmpty ? nil : ", beside \($0.heardText)" } ?? ""
                 lines.append("  \(cut.pause.start)-\(cut.pause.end)  \(TimeText.duration(cut.pause.duration))\(kind) -> cut \(ranges.joined(separator: ", "))  ...\(cut.pause.before) | \(cut.pause.after)...\(beside)")
@@ -274,9 +285,21 @@ extension TightenResult: ReadableResult {
                     lines.append("  \(widen.pause.start)-\(widen.pause.end)  \(TimeText.duration(widen.pause.duration)) \(widen.kind.rawValue) -> +\(TimeText.duration(widen.added)) at the join at \(widen.at) (\(TimeText.duration(widen.tail)) after, \(TimeText.duration(widen.head)) before)  ...\(widen.pause.before) | \(widen.pause.after)...")
                 }
             }
+            if let lead, !cuts.isEmpty {
+                lines.append("Each join keeps its pause after the word before and \(TimeText.duration(lead)) before the word after, so the clip coming in starts just before he speaks.")
+            }
             var change = "Removes \(TimeText.duration(removed))"
             if added > .zero { change += ", adds \(TimeText.duration(added))" }
             lines.append("\(change): \(durationBefore) -> \(durationAfter).")
+        }
+        if let pauses {
+            let unread = pauses.filter { $0.kind == nil }.count
+            if unread > 0 {
+                lines.append("\(unread) of \(pauses.count) pauses have only a guessed kind: Bark puts a full stop wherever Mike pauses, so read each one's words and give its kind (mid, clause, sentence, topic, keep) with --kinds <file> before --apply.")
+            }
+        }
+        if let minClip, !putBack.isEmpty {
+            lines.append("Put back \(putBack.count) pause\(putBack.count == 1 ? "" : "s") so no clip is under \(TimeText.duration(minClip)): \(putBack.map { "\($0.start)-\($0.end)" }.joined(separator: ", ")).")
         }
         if !protected.isEmpty {
             lines.append("Left \(protected.count) protected pause\(protected.count == 1 ? "" : "s") alone: \(protected.map { "\($0.start)-\($0.end)" }.joined(separator: ", ")).")
@@ -293,6 +316,36 @@ extension TightenResult: ReadableResult {
 }
 
 extension TightenResult {
+    /// `--lead-only`: the joins rolled, and the ones that wait but can't.
+    func leadsText(_ leads: [LeadJoin]) -> String {
+        var lines: [String] = []
+        let mode = applied == nil ? "dry run" : "applied"
+        let lead = TimeText.duration(self.lead ?? .zero)
+        let rolled = leads.filter { $0.roll != nil }
+        func quote(_ join: LeadJoin) -> String { join.words.isEmpty ? "" : "  \"\(join.words)\"" }
+        if rolled.isEmpty {
+            lines.append("Nothing to roll: of \(leads.count) join\(leads.count == 1 ? "" : "s") in the take, every clip already starts within \(lead) of his first word, or can't move.")
+        } else {
+            let waited = rolled.reduce(0.0) { $0 + $1.wait.seconds }
+            lines.append("Roll \(rolled.count) of \(leads.count) joins so each clip starts \(lead) before he speaks, \(String(format: "%.2f", waited / Double(rolled.count))) s of waiting face on average (\(mode), revision \(revision)):")
+            for join in rolled {
+                lines.append("  \(join.at)  waited \(TimeText.duration(join.wait)) -> cut \(TimeText.duration(join.roll ?? .zero)) later\(quote(join))")
+            }
+        }
+        let stuck = leads.filter { $0.roll == nil && $0.wait.seconds > QualityCheck.faceWaitLongest }
+        if !stuck.isEmpty {
+            lines.append("Left \(stuck.count) join\(stuck.count == 1 ? "" : "s") that wait\(stuck.count == 1 ? "s" : "") over \(TimeText.duration(Time(seconds: QualityCheck.faceWaitLongest))) but can't roll (no quiet after the clip before to grow into, or the clip after is too short). Trim those by hand and listen:")
+            for join in stuck { lines.append("  \(join.at)  waits \(TimeText.duration(join.wait))\(quote(join))") }
+        }
+        for warning in warnings { lines.append("Warning: \(warning)") }
+        if let applied {
+            lines.append("Applied as revision \(applied.revision) (\"\(applied.label)\"). Undo with `tandem undo`. Run tandem check --quick: B-roll edges on the old cuts are a frame or two off them now.")
+        } else if !rolled.isEmpty {
+            lines.append("Nothing changed yet. Run again with --apply (or apply: true) to roll them.")
+        }
+        return lines.joined(separator: "\n")
+    }
+
     /// The pauses left alone for what's in their sound, by why.
     var skippedText: [String] {
         func plural(_ n: Int, _ noun: String) -> String { "\(n) \(noun)\(n == 1 ? "" : "s")" }
@@ -318,7 +371,8 @@ extension TightenResult {
                 let sides = [("start", skip.startEdge), ("end", skip.endEdge)].compactMap { name, edge in
                     edge.map { "\(name) \($0.verdict.rawValue) (\(String(format: "%.1f", $0.margin)) dB under the speech)" }
                 }
-                lines.append("  \(skip.pause.start)-\(skip.pause.end)  \(sides.joined(separator: ", "))")
+                let what = sides.isEmpty ? "...\(skip.pause.before) | \(skip.pause.after)..." : sides.joined(separator: ", ")
+                lines.append("  \(skip.pause.start)-\(skip.pause.end)  \(what)")
             }
         }
         return lines

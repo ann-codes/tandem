@@ -7,13 +7,52 @@ Recipes for tightening pauses, taking out fillers, cutting a phrase, a false sta
 ```bash
 tandem pauses --min 0.5                      # what's there
 tandem cut --fillers --apply                 # first, the ums and uhs between pauses
-tandem tighten --mike                        # the plan, nothing changes
-tandem tighten --mike --protect 2:14.5,5:03 --widen --apply
+tandem tighten --filmora --kinds /tmp/kinds.json      # writes every pause, nothing changes
+# read each pause's words in /tmp/kinds.json and set "kind"
+tandem tighten --filmora --kinds /tmp/kinds.json --apply
+tandem check --cuts                          # every join clean
 tandem clip 0:00 1:00 -o /tmp/review.mp4     # watch the result
-tandem undo                                  # if it's too tight
+tandem undo                                  # if it's off
 ```
 
-`--mike` is Mike's rules ("How Mike likes a take cut" in the skill): 0.4 s
+`--filmora` finds pauses by volume, the way Mike's old Filmora silence
+detection did: every stretch where all the take's tracks are under
+`--threshold` (-35 dB peak) and quiet above 4 kHz, for at least `--min`
+(0.3 s). A soft final "s" is still a word; a breath is pause. Each pause
+then keeps a total gap, speech end to speech start, by its kind: `mid`
+0.12 s, `clause` 0.2 s, `sentence` 0.4 s, `topic` 0.8 s (twice
+`--buffer`) and `keep` left alone. The keep goes after the word before,
+and only `--lead` (0.05 s) before the word after, so the clip coming in
+starts a frame or two before Mike speaks ([Where a join's pause
+goes](#where-a-joins-pause-goes)). The timeline's own start and end are cut
+right to the edge (the start up to the lead before the first word); a
+silence running into `--from` or `--to` keeps its keep there.
+Stretches where no take track plays, and files whose sound can't be read,
+are never cut.
+
+The kind is the agent's call. Bark puts a full stop wherever Mike pauses
+("call this. functions"), so punctuation can't say. The dry run guesses
+from it (a comma or a clause word after is `clause`, a full stop
+`sentence`, or `topic` over 1.5 s, and the rest `mid`); `--kinds <file>`
+writes every pause with about eight words either side and the guess, with
+`kind` empty. Fill in every one, then `--apply` with the same file. It
+refuses while any is empty, and if the timeline changed since the file was
+written (re-run the dry run into a new file). In MCP, the dry run's
+`pauses` has the same list and `kinds` takes `{at, kind}`.
+
+`--min-clip` (off unless given, `--min-clip 2` for Mike's old "no clips under 2 s") puts back the pause beside any clip a cut
+would leave shorter than that, if putting it back adds a second or less
+and it's a `sentence` or `topic` pause; Filmora had no such setting, it's
+Mike's rule. Anything loud enough stays, a stray "um" or a click included:
+cut those with `tandem cut` first.
+
+The transcript rules, only when Mike asks for them:
+
+```bash
+tandem tighten --mike --protect 2:14.5,5:03 --widen --apply
+```
+
+`--mike` is Mike's older rules ("How Mike likes a take cut" in the skill): 0.4 s
 after a sentence, 0.12 s after a comma and 0.08 s for a thinking pause
 mid-sentence, and only pauses of 0.5 s or more change, so breaths and
 natural pauses stay as he said them. What a pause follows comes from the
@@ -23,11 +62,9 @@ keep with `--sentence`, `--comma` and `--mid`; a kind with no keep is left
 alone, and a comma without one uses `--mid`. `--min` (default 0.5 here) is
 the shortest sentence pause that changes and `--mid-min` (default 0.5) the
 shortest comma or mid-sentence one. Each cut is as many whole frames as fit,
-so what's kept is within a frame of the keep. A join never keeps less than
-`tandem cut` keeps: 0.03 s after the word before and 0.08 s before the word
-after (a word's sound can start before its burst), so the 0.08 s
-mid-sentence keep comes out at 0.11 s, and the 0.12 s comma keep splits
-0.04 s / 0.08 s.
+so what's kept is within a frame of the keep. As with `--filmora`, the keep
+goes after the word before (at least 0.03 s) and `--lead` before the word
+after, so the 0.12 s comma keep is 0.07 s / 0.05 s.
 
 `--protect` takes timeline times, comma separated (or the option again):
 the pauses containing them are left alone, for the beats Mike wants kept (a
@@ -46,8 +83,8 @@ back, so listen to widened joins. It's off unless you ask, and leaves
 through-edits and protected joins alone.
 
 Without any of those, every pause of at least `--min` (0.6) is shortened to
-`--keep` (0.15), half the kept pause after the last word and half before the
-next one, with the cut edges rounded inwards to frames.
+`--keep` (0.15), all but the lead of it after the last word, with the cut
+edges rounded inwards to frames.
 
 The transcript only finds the pauses. Each one is then listened to, on
 every unmuted audio track of the take that plays there (the voice, another
@@ -65,8 +102,8 @@ or video tracks' sound), each against its own file's floor, the way
   transcript left out. That sound stays where it is and each quiet stretch
   either side of it is cut, so what's left is the sound and the keep. The
   sound counts towards the keep, and so does 30 ms of quiet either side of
-  it; what's left of the keep goes after the word before and before the word
-  after, as in a gap with nothing in it. A stretch beside sound that would
+  it; what's left of the keep goes after the word before, then beside the
+  sound, and the word after keeps only the lead. A stretch beside sound that would
   lose less than 0.08 s isn't cut (not worth two more joins), and if
   there's no quiet long enough anywhere, the pause is left alone.
 - Both sides of every join are judged as `check --cuts` judges them. A side
@@ -92,6 +129,45 @@ part of the video. In MCP: `tighten {"mike": true, "protect": [134.5],
 "widen": true}`, then again with `"apply": true, "expectedRevision": <the
 plan's revision>`.
 
+
+## Where a join's pause goes
+
+Mike, reviewing the Let's Build It video (13 Nov 2026): "often what you do
+is you don't start the next clip soon enough. So you end up with like my
+gormless face on screen for like a couple of hundred milliseconds... it
+should start the next clip like one frame or two frames before the speech
+starts... you should add that extra time onto the end of the previous
+clip." So at every join between two pieces of the take, the pause the join
+keeps sits on the end of the clip going out, and the clip coming in starts
+`--lead` (0.05 s) before its first word's sound. `tighten` (every mode) and
+`tandem cut` place joins that way. The word's start is read the way
+`check --cuts` reads the sound: a breath before it is pause, a soft first
+consonant is followed back down its ramp, and if the join there wouldn't be
+clean it keeps more before the word until it is. `--lead` changes it, in
+timeline seconds (0 cuts right to the word's sound).
+
+An edit cut before this, or by hand, can still open clips on his face
+waiting. `tandem check` notes each join where the camera shows him for
+more than 0.1 s before he speaks (`faceWaits`), and this rolls them:
+
+```bash
+tandem tighten --lead-only                    # every join, its wait and its roll
+tandem tighten --lead-only --apply
+tandem check --quick                          # B-roll edges that sat on the old cuts
+```
+
+Each join's cut moves later on whole frames, on every track of the take
+there (linked camera, screen and voice together), so the clip coming in
+starts the lead before his first word and the clip going out runs on
+through the quiet after its last word. It only grows through quiet (it
+stops 0.03 s short of the next sound) and never into what the next clip
+plays, so a join with sound right after the cut rolls less, and one with
+none rolls nothing and is listed to trim by hand. The timeline's length and
+every other clip stay put. Joins under a wipe, a section card or a
+transition are left alone: their cut has to stay under the wipe. Before it
+hands back the plan, `check --cuts` is run on the edit as it would be after
+the rolls, and a roll whose join it flags (when it didn't before) is left
+out.
 ## Take out fillers
 
 ```bash
@@ -179,11 +255,16 @@ roughly where the words are and which ones stay. A real pause is 80 ms or
 more of quiet, full band and above 4 kHz alike; a word the transcript has
 0.2 s late still lands on the right side of it.
 
-The join keeps the pause Mike's tighten rules would (0.4 s after a
-sentence, 0.12 s after a comma, 0.08 s mid-sentence, by the word before the
-cut), split either side as `tighten` splits it but never under 0.03 s after
-the word before or 0.08 s before the word after, and never closer than
-0.03 s to the words cut. Where neither pause was 0.5 s, the join keeps the
+Between sentences, round a false start and at the take's start, the join
+keeps 0.8 s, what Filmora left when Mike deleted a retake's clip (its 0.4 s
+softening buffer each side), so it matches the pauses `tighten --filmora`
+leaves. A cut that's only fillers, or one after a comma or mid-sentence,
+keeps the pause Mike's tighter rules would (0.12 s after a comma, 0.08 s
+mid-sentence, by the word before the cut). That pause goes on the end of
+the clip before the cut, at least 0.03 s after its word, and the clip after
+starts `--lead` (0.05 s) before its first word ([Where a join's pause
+goes](#where-a-joins-pause-goes)); neither edge goes closer than 0.03 s to
+the words cut. Where neither pause was 0.5 s, the join keeps the
 longer one as it was. Each edge goes on a frame where one lands in its
 pause. The pauses are timeline time, so on a clip at 2x the join keeps
 twice as much of the file. Each edge goes in a pause its own clip plays: a
@@ -200,6 +281,18 @@ voice runs on more than 0.3 s past where the transcript has its words.
 Sound no transcript word claims, inside the stretch or within 0.3 s of it,
 is cut with it. When cutting it would also cut a word that stays, it's
 left and the stretch's `missed` says how much, so listen there.
+
+Words said too quietly to stand out from the room (an editor's note
+muttered under the take), or a stretch with no words in it at all (the
+clap and quiet before the first word), have no sound of their own to
+place edges by. Asked for as a phrase or a range, they're cut in the quiet
+round them: from the pause after the last word that stays before them to
+the pause before the next, and the plan says so (`quiet`) so you listen
+to it. A pause that runs to the start of what the clip plays (the take's
+start, or a join) is cut from there, keeping the whole pause before the
+word after, and one running to the clip's end is cut to it. Fillers found
+with `--fillers` that aren't heard are still left in ("not heard in the
+sound"): cutting them would only tighten a pause, which is tighten's job.
 
 A phrase said more than once needs `--at` with (roughly) the time of the
 one to cut, and that counts overlapping ones ("very very" is said twice in
@@ -370,7 +463,11 @@ Drift is how far the two clocks part over the overlap. It's good to a
 couple of milliseconds, since someone walking between the cameras moves
 their sound about 3 ms a metre, and it warns when it's over half a frame.
 Unrelated sound scores under 10 for confidence, and under 15 is refused
-with nothing changed, so check the file before trying again.
+with nothing changed, so check the file before trying again. A real match
+scores in the hundreds or more on a clean mic. The whole-file match is
+then checked in stretches of the overlap; when fewer than half of them
+agree, the line says "Only N of M stretches ... agreed" and the offset may
+be wrong, so listen before going on.
 
 In one undo step each file joins the camera's take (`takeID`,
 `takeOffset`, shown by `tandem media`) and goes beside the take's clips,
@@ -385,6 +482,19 @@ plays differently).
   muted "Camera sound" track, so the mic is what plays and what gets
   transcribed. Outside the mic's stretch the camera's sound stays on
   Voice.
+- A second mic (a remote podcast's other guest) finds the first on Voice
+  and goes on its own "Voice 2" track right under it, with the same
+  levelling. Sync both in one call or one after the other.
+- Files of one take end a few frames apart. Where a mic stops (or starts)
+  under half a second from a clip's edge, the camera's sound in that
+  sliver is muted too, so no blip of it plays after the mic. Leave the
+  sliver of picture alone: it's a through-edit and may carry the take's
+  fade (removing a clip says when a transition goes with it).
+
+`tandem media` shows each file's `takeOffset`, but changing it with
+`updateMedia` once the file is placed moves nothing: its clips keep
+playing the same part of the file, and the edit warns. Slip them by the
+opposite amount, or remove them and `placeSynced` again.
 
 `showAngle` shows an angle over a range: its clips there come on and the
 take's other angles go off. `"trackID": "Camera"` shows the camera again.

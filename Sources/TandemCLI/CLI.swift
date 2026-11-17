@@ -310,15 +310,61 @@ struct CLI {
             let protect = try (args.repeated["protect"] ?? [])
                 .flatMap { $0.split(separator: ",") }
                 .map { try parseTime($0.trimmingCharacters(in: .whitespaces)) }
-            let request = TightenRequest(
+            // `--kinds <file>`: the pause kinds the agent read from the words.
+            // On a dry run with no file yet, the plan's pauses are written to
+            // it with a guess each and the kind left empty, to fill in.
+            let kindsPath = args.options["kinds"].map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
+            var kindsFile: PauseKindsFile?
+            if let kindsPath, FileManager.default.fileExists(atPath: kindsPath.path) {
+                do {
+                    kindsFile = try JSONDecoder().decode(PauseKindsFile.self, from: Data(contentsOf: kindsPath))
+                } catch {
+                    throw UsageError(message: "Couldn't read \(kindsPath.path) as a kinds file: \(error.localizedDescription)")
+                }
+            }
+            if kindsPath != nil, !args.has("filmora") {
+                throw UsageError(message: "--kinds goes with --filmora.")
+            }
+            // The pauses are found with these; the file says what it was made with.
+            let found = PauseKindsFile.Settings(
+                threshold: try args.number("threshold"), min: try seconds(args, "min"),
+                from: try time(args, "from")?.seconds, to: try time(args, "to")?.seconds
+            )
+            if let kindsFile, kindsFile.settings == nil {
+                throw UsageError(message: "\(args.options["kinds"] ?? "") doesn't say what settings found its pauses (an older file): make a new one with a dry run.")
+            }
+            if let kindsFile, let made = kindsFile.settings, made != found {
+                throw UsageError(message: "\(args.options["kinds"] ?? "") was made with other settings (threshold, min, from, to): give the same ones, or make a new kinds file. Other settings find other pauses.")
+            }
+            if let kindsFile, let expect = try args.integer("expect"), expect != kindsFile.revision {
+                throw UsageError(message: "\(args.options["kinds"] ?? "") is for revision \(kindsFile.revision), not \(expect): times have moved since. Make a new kinds file.")
+            }
+            if kindsFile == nil, kindsPath != nil, args.has("apply") {
+                throw UsageError(message: "No kinds file at \(args.options["kinds"] ?? ""). Run it without --apply first: that writes the file, with a guess for every pause to check and fill in.")
+            }
+            var request = TightenRequest(
                 min: try seconds(args, "min"), keep: try seconds(args, "keep"),
                 sentence: try seconds(args, "sentence"), comma: try seconds(args, "comma"), mid: try seconds(args, "mid"),
                 midMin: try seconds(args, "mid-min"), mike: args.has("mike") ? true : nil,
+                filmora: args.has("filmora") ? true : nil, threshold: try args.number("threshold"), buffer: try seconds(args, "buffer"),
+                minClip: try seconds(args, "min-clip"), kinds: try kindsFile?.marks(),
                 protect: protect.isEmpty ? nil : protect, widen: args.has("widen") ? true : nil,
+                lead: try seconds(args, "lead"), leadOnly: args.has("lead-only") ? true : nil,
                 apply: args.has("apply"), from: try time(args, "from"), to: try time(args, "to"),
                 label: args.options["label"], expectedRevision: try args.integer("expect")
             )
-            return show(try await client().call(request), json: json)
+            // The kinds are for the revision they were read at: times move
+            // with any edit since.
+            if let kindsFile, request.apply == true, request.expectedRevision == nil { request.expectedRevision = kindsFile.revision }
+            let result = try await client().call(request)
+            if let kindsPath, kindsFile == nil, let pauses = result.pauses {
+                let file = PauseKindsFile(revision: result.revision, settings: found, pauses: pauses)
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+                try encoder.encode(file).write(to: kindsPath)
+                FileHandle.standardError.write(Data("Wrote \(pauses.count) pauses to \(kindsPath.path): read each one's words, set its \"kind\" (mid, clause, sentence, topic or keep), then run this again with --apply.\n".utf8))
+            }
+            return show(result, json: json)
         case "cut":
             // Phrases are the positionals; each --at goes with the phrase
             // in the same place, for one said more than once.
@@ -341,7 +387,7 @@ struct CLI {
             let request = CutRequest(
                 remove: remove, fillers: args.has("fillers") ? true : nil, from: try time(args, "from"), to: try time(args, "to"),
                 protect: protect.isEmpty ? nil : protect,
-                falseStart: args.has("false-start") ? true : nil, apply: args.has("apply"),
+                falseStart: args.has("false-start") ? true : nil, lead: try seconds(args, "lead"), apply: args.has("apply"),
                 label: args.options["label"], expectedRevision: try args.integer("expect")
             )
             return show(try await client().call(request), json: json)
@@ -363,7 +409,9 @@ struct CLI {
             try args.expectPositionals(atMost: 0, command: name)
             let request = CaptionsRequest(
                 from: try time(args, "from"), to: try time(args, "to"), words: try args.integer("max-words"),
-                y: try args.number("y"), track: args.options["track"], apply: args.has("apply"),
+                y: try args.number("y"), track: args.options["track"],
+                style: args.options["style"], color: args.options["color"], font: args.options["font"], size: try args.number("size"),
+                apply: args.has("apply"),
                 label: args.options["label"], expectedRevision: try args.integer("expect")
             )
             return show(try await client().call(request), json: json)
@@ -590,6 +638,7 @@ struct CLI {
             }
             if takes.count > shown { lines.append("And \(takes.count - shown) more camera takes; `tandem media` lists them.") }
             lines.append("Not the camera? \(command(takes.count == 1 ? takes[0].mediaID : "<id>", role: .other))")
+            if let line = matteLine(takes.compactMap { project.media($0.mediaID) }, in: project) { lines.append(line) }
         } else if added.contains(where: { $0.kind == .video }) {
             // The likeliest take is the longest video with sound that nothing
             // else claimed.
@@ -605,6 +654,26 @@ struct CLI {
             lines.append("Frame rate: \(String(format: "%g", rate.framesPerSecond)) fps, the camera take's. To change it: tandem apply '{\"updateSettings\": {\"patch\": {\"frameRate\": {\"numerator\": 30, \"denominator\": 1}}}}'")
         }
         return lines
+    }
+
+    /// Mike's PiP is the cutout, and Tandem mattes the whole camera file
+    /// before it shows, which for a long 4K take is hours. On the Convex Auth
+    /// v2 video (12 Nov 2026) the matte wasn't started until the PiP was
+    /// needed, so the agent framed his face in a box instead ("This is not
+    /// our usual way"). So a new project says to start it straight away.
+    /// Not for a Short, whose face box has the cutout off.
+    static func matteLine(_ takes: [MediaItem], in project: Project) -> String? {
+        guard project.settings.width >= project.settings.height else { return nil }
+        let videos = takes.filter { $0.kind == .video && $0.hasVideo }
+        guard let longest = videos.max(by: { ($0.duration ?? .zero) < ($1.duration ?? .zero) }) else { return nil }
+        let minutes = Int(((longest.duration ?? .zero).seconds / 60).rounded())
+        let size = (longest.width ?? 0) >= 3840 ? "4K " : ""
+        let article = String(minutes).hasPrefix("8") || minutes == 11 || minutes == 18 ? "an" : "a"
+        let length = minutes >= 1 ? " (this one is \(article) \(minutes)-minute \(size)take)" : ""
+        return "Start the cutout matte now: Mike's PiP is pipRight with the cutout, and Tandem mattes the whole camera file before the cutout shows, "
+            + "which takes hours for a long 4K take\(length). Once the take is placed, put one camera clip in pipRight "
+            + "(tandem apply '{\"applyLayout\": {\"clipIDs\": [\"<camera clip>\"], \"preset\": \"pipRight\"}}') and the app starts it. "
+            + "Don't frame his face in a box while it runs."
     }
 
     private func serve(_ args: Arguments) async throws -> Int32 {

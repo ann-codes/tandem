@@ -192,6 +192,7 @@ public final class TandemService: @unchecked Sendable {
             openIn: owner,
             headless: mode == .headless,
             jobs: analysis.jobs,
+            unmade: mode == .headless ? unmadeAnalysis(project) : nil,
             exports: running,
             recoveredEdits: session.recoveredEdits,
             apiVersion: TandemAPI.version,
@@ -258,7 +259,14 @@ public final class TandemService: @unchecked Sendable {
     /// loudness, transcript, waveform and the rest are made again from it.
     /// Refuses a file whose length differs by more than a frame, or that
     /// lacks the sound or picture the old one had, since clips cut against
-    /// the old file would land on the wrong words.
+    /// the old file would land on the wrong words. When both have sound it
+    /// lines the new one up with the old by it first, and refuses one that
+    /// starts at a different moment, saying which end to trim: an AAC file's
+    /// encoder priming (44 ms at 48 kHz) is dropped by AVFoundation and kept
+    /// by ffmpeg, so a copy processed with ffmpeg came out 44 ms long at the
+    /// start, and trimming its end to fit put James's voice 44 ms late
+    /// (Databased S2E7, November 2026). The same path with new contents (a
+    /// file processed in place) is taken as a new file too.
     public func replaceMedia(_ mediaID: String, with file: String, label: String?, author: String?, context: CallContext) async throws -> ReplacedMedia {
         let project = coordinator.project
         guard let item = project.media(mediaID) else { throw ServiceError(.notFound, "There's no media \(mediaID).") }
@@ -271,13 +279,34 @@ public final class TandemService: @unchecked Sendable {
             throw ServiceError(.invalid, "Couldn't read \(url.lastPathComponent): \((error as? LocalizedError)?.errorDescription ?? "\(error)")")
         }
         replaced.path = MediaRelinker.storedPath(for: url, in: folder)
-        replaced.replaces = MediaItem.replaces(item, with: replaced.path)
-        guard replaced.path != item.path else { throw ServiceError(.invalid, "\(mediaID) already plays \(item.path).") }
+        let inPlace = replaced.path == item.path
+        if inPlace {
+            guard replaced.fingerprint != item.fingerprint else {
+                throw ServiceError(.invalid, "\(mediaID) already plays \(item.path), and the file hasn't changed since.")
+            }
+        } else {
+            replaced.replaces = MediaItem.replaces(item, with: replaced.path)
+        }
         if item.hasAudio && !replaced.hasAudio { throw ServiceError(.invalid, "\(replaced.path) has no sound and \(item.path) did.") }
         if item.hasVideo && !replaced.hasVideo { throw ServiceError(.invalid, "\(replaced.path) has no picture and \(item.path) did.") }
+        // The old file is gone when it was processed in place.
+        let start = inPlace || !item.hasAudio || !replaced.hasAudio ? nil : try await startDifference(item, url)
+        let anyway = "To use it anyway, apply updateMedia with the new path."
+        if case .shifted(let shift)? = start {
+            let ms = Int((abs(shift) * 1000).rounded())
+            let seconds = String(format: "%.4f", abs(shift))
+            throw ServiceError(.invalid, shift > 0
+                ? "\(replaced.path) has \(ms) ms more at its start than \(item.path): the same moment is \(seconds) s later in it, so every clip would play \(ms) ms early. Trim \(seconds) s off its start, not its end (ffmpeg -ss \(seconds) -i ...), and replace again. An AAC file's encoder priming does this: AVFoundation drops it and ffmpeg keeps it. \(anyway)"
+                : "\(replaced.path) is missing \(ms) ms at its start compared with \(item.path): the same moment is \(seconds) s earlier in it, so every clip would play \(ms) ms late. Pad \(seconds) s of silence onto its start (ffmpeg -af adelay=\(ms):all=1), not its end, and replace again. \(anyway)")
+        }
         let frame = project.settings.frameRate.frameDuration
         if let old = item.duration, let new = replaced.duration, abs((new - old).seconds) > frame.seconds {
-            throw ServiceError(.invalid, "\(replaced.path) is \(TimeText.duration(new)) long and \(item.path) is \(TimeText.duration(old)), more than a frame apart, so clips cut against the old file would play the wrong moments. To use it anyway, apply updateMedia with the new path.")
+            let end: String
+            switch start {
+            case .same?: end = " They start at the same moment, so the difference is at the end: \(new > old ? "trim" : "pad") \(String(format: "%.4f", abs((new - old).seconds))) s at its end."
+            default: end = " Check which end it's at before trimming: AVFoundation drops an AAC file's encoder priming at the start, and ffmpeg keeps it."
+            }
+            throw ServiceError(.invalid, "\(replaced.path) is \(TimeText.duration(new)) long and \(item.path) is \(TimeText.duration(old)), more than a frame apart, so clips cut against the old file would play the wrong moments.\(end) \(anyway)")
         }
         let before = try JSONValue.from(item)
         let after = try JSONValue.from(replaced)
@@ -292,10 +321,37 @@ public final class TandemService: @unchecked Sendable {
         let used = Set(project.allTracks.flatMap(\.clips).compactMap(\.mediaID))
         let copies = project.media.filter { $0.id != mediaID && $0.path == replaced.path && !used.contains($0.id) }
         let name = (replaced.path as NSString).lastPathComponent
-        let applied = try apply(ApplyRequest(label: label ?? "Replace \((item.path as NSString).lastPathComponent) with \(name)", author: author,
+        var applied = try apply(ApplyRequest(label: label ?? "Replace \((item.path as NSString).lastPathComponent) with \(name)", author: author,
                                              commands: [.updateMedia(mediaID: mediaID, patch: patch)] + copies.map { .removeMedia(mediaID: $0.id) }), context: context)
+        if case .unknown(let why)? = start {
+            applied.warnings.append("Couldn't check that \(name) starts at the same moment as \((item.path as NSString).lastPathComponent) by their sound (\(why)); listen to a clip of it against the picture.")
+        }
         let clips = coordinator.project.allTracks.flatMap(\.clips).filter { $0.mediaID == mediaID }.count
         return ReplacedMedia(mediaID: mediaID, from: item.path, to: replaced.path, oldDuration: item.duration, newDuration: replaced.duration, clips: clips, applied: applied)
+    }
+
+    enum StartDifference {
+        case same
+        /// Seconds further into the new file the same moment is.
+        case shifted(Double)
+        case unknown(String)
+    }
+
+    /// Whether a replacement file's sound starts at the same moment as the
+    /// old one's, lined up by `SoundSync`. Up to 2 ms either way is the
+    /// same: no one sees that, and a processed copy can smear a sample.
+    func startDifference(_ item: MediaItem, _ url: URL) async throws -> StartDifference {
+        let old = folder.url(for: item)
+        guard FileManager.default.fileExists(atPath: old.path) else { return .unknown("the old file is gone") }
+        do {
+            let match = try await SoundSync.match(reference: old, file: url)
+            guard !match.doubtful else { return .unknown("they don't line up clearly") }
+            return abs(match.offset) <= 0.002 ? .same : .shifted(match.offset)
+        } catch is SoundSync.NoMatch {
+            return .unknown("they don't line up clearly")
+        } catch {
+            return .unknown((error as? LocalizedError)?.errorDescription ?? "\(error)")
+        }
     }
 
     /// The analyses that apply to a file, and how far along each is.
@@ -450,6 +506,12 @@ public final class TandemService: @unchecked Sendable {
     }
 
     public func tighten(_ request: TightenRequest, context: CallContext) async throws -> TightenResult {
+        if request.leadOnly == true { return try await rollLeads(request, context: context) }
+        let lead = try Self.lead(request.lead)
+        if request.filmora == true { return try await tightenByVolume(request, context: context) }
+        if request.kinds != nil || request.minClip != nil || request.buffer != nil || request.threshold != nil {
+            throw ServiceError(.badRequest, "`kinds`, `minClip`, `buffer` and `threshold` go with `filmora`.")
+        }
         let rules = try pauseRules(for: request)
         let (project, revision) = coordinator.snapshot()
         try checkExpected(request.expectedRevision, at: revision)
@@ -466,7 +528,7 @@ public final class TandemService: @unchecked Sendable {
         // reach past the transcript's gap.
         let found = SoundTightening.candidates(in: map, rules: rules, from: request.from, to: request.to)
         let planned = await SoundTightening.plan(
-            found, rules: rules, snug: request.bySentence, protect: protect, from: request.from, to: request.to,
+            found, rules: rules, snug: request.bySentence, protect: protect, from: request.from, to: request.to, lead: lead,
             map: map, project: project, folder: folder
         )
         let cuts = planned.cuts
@@ -500,6 +562,7 @@ public final class TandemService: @unchecked Sendable {
             durationBefore: project.duration, durationAfter: project.duration - removed + added,
             commands: commands, applied: nil, warnings: warnings, missing: map.missing
         )
+        result.lead = Time(seconds: lead)
         guard !commands.isEmpty else { return result }
         let apply = ApplyRequest(
             label: request.label ?? tightenLabel(result), author: request.author, commands: commands,
@@ -507,6 +570,135 @@ public final class TandemService: @unchecked Sendable {
         )
         let applied = try self.apply(apply, context: context)
         result.durationAfter = applied.duration
+        result.warnings += applied.warnings
+        if request.apply == true { result.applied = applied }
+        return result
+    }
+
+    /// `tighten` with `filmora`: cut by volume, as Mike's old Filmora
+    /// silence detection did (`VolumeTightening`).
+    func tightenByVolume(_ request: TightenRequest, context: CallContext) async throws -> TightenResult {
+        let transcriptOnly: [(String, Bool)] = [
+            ("keep", request.keep != nil), ("sentence", request.sentence != nil), ("comma", request.comma != nil),
+            ("mid", request.mid != nil), ("midMin", request.midMin != nil), ("mike", request.mike == true), ("widen", request.widen == true)
+        ]
+        if let clash = transcriptOnly.first(where: { $0.1 }) {
+            throw ServiceError(.badRequest, "`\(clash.0)` is for tightening by the transcript. With `filmora`, give `min`, `buffer` and `threshold` instead.")
+        }
+        var settings = VolumeTightening.Settings.filmora
+        if let min = request.min { settings.minimum = min }
+        if let buffer = request.buffer { settings.buffer = buffer }
+        if let threshold = request.threshold { settings.threshold = threshold }
+        if let minClip = request.minClip { settings.minimumClip = minClip }
+        settings.lead = try Self.lead(request.lead)
+        guard settings.minimum > 0 else { throw ServiceError(.badRequest, "`min` must be more than 0 seconds.") }
+        guard settings.buffer >= 0 else { throw ServiceError(.badRequest, "`buffer` can't be less than 0 seconds.") }
+        guard settings.threshold < 0 else { throw ServiceError(.badRequest, "`threshold` is in dBFS, under 0, like -35.") }
+
+        let (project, revision) = coordinator.snapshot()
+        try checkExpected(request.expectedRevision, at: revision)
+        // A word the transcript has where the sound has only the room would
+        // decide a pause's kind, so it's left out (`withoutPhantoms`).
+        let map = await SoundTightening.withoutPhantoms(
+            TranscriptTools.speechMap(project, analysis: analysis), from: request.from, to: request.to, project: project, folder: folder
+        ).map
+        let planned = await VolumeTightening.plan(
+            settings: settings, protect: request.protect ?? [], kinds: request.kinds ?? [],
+            from: request.from, to: request.to,
+            map: map, project: project, folder: folder
+        )
+        // The kind of every pause is the agent's call, read from the words:
+        // Bark's punctuation can't say (a full stop wherever Mike pauses).
+        // So the cut only goes in once every pause has one.
+        let unread = planned.pauses.filter { $0.kind == nil }
+        if request.apply == true, !unread.isEmpty {
+            let list = unread.prefix(5).map { "\($0.start) (\($0.guess.rawValue)?) ...\($0.before.split(separator: " ").suffix(4).joined(separator: " ")) | \($0.after.split(separator: " ").prefix(4).joined(separator: " "))..." }
+            throw ServiceError(.badRequest, "\(unread.count) of \(planned.pauses.count) pauses have no kind yet, like \(list.joined(separator: "; ")). Read each pause's words and give its kind (mid, clause, sentence, topic or keep) in `kinds`: with the CLI, `tandem tighten --filmora --kinds <file>` writes the file on a dry run, then fill in every kind and run it again with --apply.")
+        }
+        let cuts = planned.cuts
+        let commands = TranscriptTools.commands(for: cuts)
+        let removed = cuts.reduce(Time.zero) { $0 + $1.cut.duration }
+        var warnings = planned.warnings
+        let locked = project.allTracks.filter { $0.rippleMode == .cut && $0.locked }.map(\.name)
+        if !locked.isEmpty && !commands.isEmpty {
+            let message = "Track \(locked.map { "\"\($0)\"" }.joined(separator: ", ")) is locked, so tightening would put the take out of sync. Unlock it first."
+            if request.apply == true { throw ServiceError(.locked, message) }
+            warnings.append(message)
+        }
+        var result = TightenResult(
+            revision: revision, minimum: Time(seconds: settings.minimum), keep: Time(seconds: settings.buffer * 2),
+            sentence: nil, comma: nil, mid: nil, midMinimum: nil,
+            buffer: Time(seconds: settings.buffer), threshold: settings.threshold,
+            minClip: settings.minimumClip > 0 ? Time(seconds: settings.minimumClip) : nil, putBack: planned.putBack.map(\.pause),
+            cuts: cuts, widened: [], protected: planned.protected, skipped: [], removed: removed, added: .zero,
+            durationBefore: project.duration, durationAfter: project.duration - removed,
+            commands: commands, applied: nil, warnings: warnings, missing: []
+        )
+        result.pauses = planned.pauses
+        result.lead = settings.lead.map { Time(seconds: $0) }
+        // A pause whose cut no join could make clean is left whole, and said.
+        result.skipped = planned.notClean.map { SkippedPause(pause: $0.pause, reason: .notClean, kind: $0.spoken == .mid ? .mid : $0.spoken == .clause ? .comma : .sentence, keep: $0.keep ?? .zero, startEdge: nil, endEdge: nil) }
+        guard !commands.isEmpty else { return result }
+        let label = request.label ?? "Tighten \(cuts.count) pause\(cuts.count == 1 ? "" : "s") by kind"
+        let applied = try self.apply(
+            ApplyRequest(label: label, author: request.author, commands: commands, expectedRevision: revision, dryRun: request.apply != true),
+            context: context
+        )
+        result.durationAfter = applied.duration
+        result.warnings += applied.warnings
+        if request.apply == true { result.applied = applied }
+        return result
+    }
+
+    /// `tighten` with `leadOnly`: no cuts, a roll at each of the take's
+    /// joins so the clip coming in starts `lead` before his first word and
+    /// the pause goes on the end of the clip before (`LeadRoll`).
+    func rollLeads(_ request: TightenRequest, context: CallContext) async throws -> TightenResult {
+        let others: [(String, Bool)] = [
+            ("min", request.min != nil), ("keep", request.keep != nil), ("sentence", request.sentence != nil), ("comma", request.comma != nil),
+            ("mid", request.mid != nil), ("midMin", request.midMin != nil), ("mike", request.mike == true), ("filmora", request.filmora == true),
+            ("threshold", request.threshold != nil), ("buffer", request.buffer != nil), ("minClip", request.minClip != nil),
+            ("kinds", request.kinds != nil), ("protect", request.protect != nil), ("widen", request.widen == true)
+        ]
+        if let clash = others.first(where: { $0.1 }) {
+            throw ServiceError(.badRequest, "`leadOnly` cuts nothing, it only rolls the joins already there, so `\(clash.0)` doesn't go with it. Give `lead`, `from` and `to`.")
+        }
+        let lead = try Self.lead(request.lead)
+        let (project, revision) = coordinator.snapshot()
+        try checkExpected(request.expectedRevision, at: revision)
+        let range = TimeRange(start: request.from ?? .zero, end: request.to ?? project.duration)
+        let map = TranscriptTools.speechMap(project, analysis: analysis)
+        let found = await LeadRoll.waits(
+            project: project, folder: folder, ranges: [range], lead: lead, map: map, words: CutCheck.words(in: project, analysis: analysis),
+            verify: true
+        )
+        let rolled = found.waits.filter { $0.roll != nil }
+        // Each roll moves only its own join, so the order doesn't matter.
+        let commands = rolled.flatMap(\.commands)
+        var warnings: [String] = []
+        if !found.unread.isEmpty {
+            warnings.append("Couldn't read the sound of \(found.unread.joined(separator: ", ")), so its joins were left alone.")
+        }
+        let locked = project.allTracks.filter { $0.locked && $0.clips.contains { clip in rolled.contains { $0.clipIDs.contains(clip.id) } } }.map(\.name)
+        if !locked.isEmpty, !commands.isEmpty {
+            let message = "Track \(locked.map { "\"\($0)\"" }.joined(separator: ", ")) is locked, so its joins can't roll. Unlock it first."
+            if request.apply == true { throw ServiceError(.locked, message) }
+            warnings.append(message)
+        }
+        var result = TightenResult(
+            revision: revision, minimum: .zero, keep: .zero, sentence: nil, comma: nil, mid: nil, midMinimum: nil,
+            cuts: [], widened: [], protected: [], skipped: [], removed: .zero, added: .zero,
+            durationBefore: project.duration, durationAfter: project.duration,
+            commands: commands, applied: nil, warnings: warnings, missing: map.missing
+        )
+        result.lead = Time(seconds: lead)
+        result.leads = found.waits.map { LeadJoin(at: $0.time, wait: $0.wait, roll: $0.roll, words: $0.words) }
+        guard !commands.isEmpty else { return result }
+        let label = request.label ?? "Start \(rolled.count) clip\(rolled.count == 1 ? "" : "s") a frame or two before he speaks"
+        let applied = try self.apply(
+            ApplyRequest(label: label, author: request.author, commands: commands, expectedRevision: revision, dryRun: request.apply != true),
+            context: context
+        )
         result.warnings += applied.warnings
         if request.apply == true { result.applied = applied }
         return result
@@ -643,10 +835,13 @@ public final class TandemService: @unchecked Sendable {
             throw ServiceError(.invalid, "Invalid edit: \(first.message)")
         }
         let diff = ClipDiff(project, working)
+        // Applied, it measures them (`ApplyRequest.run`); a dry run says.
+        let unmeasured = Self.unlevelled(in: working, analysis: analysis)
+            .filter { FileManager.default.fileExists(atPath: folder.url(for: $0.item).path) }
         return ApplyResult(
             revision: revision, label: batch.label, author: batch.author,
             createdIDs: context.createdIDs,
-            warnings: context.warnings + ProjectValidator.newWarnings(issues, since: project),
+            warnings: context.warnings + ProjectValidator.newWarnings(issues, since: project) + Self.unlevelledWarnings(unmeasured),
             dryRun: true, repeated: false,
             added: diff.added, removed: diff.removed, changed: diff.changed, duration: working.duration
         )
