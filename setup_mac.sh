@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-TANDEM_BUILD_CONFIGURATION=release bash "$SCRIPT_DIR/build-app.sh"
+TANDEM_BUILD_CONFIGURATION="${TANDEM_BUILD_CONFIGURATION:-debug}" bash "$SCRIPT_DIR/build-app.sh"
 
 echo ""
 echo "Tandem is installed at ${TANDEM_APP_DIR:-$HOME/Applications/Tandem.app}"

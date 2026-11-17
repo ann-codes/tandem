@@ -28,6 +28,86 @@ if ! command -v swift >/dev/null 2>&1; then
   exit 1
 fi
 
+# Work around Apple Command Line Tools bug where an obsolete
+# arm64-apple-macos.private.swiftinterface shadows the Swift 6 PackageDescription.
+if [[ -z "${SWIFT_EXEC:-}" ]]; then
+  CLT_DIR="$(xcode-select -p 2>/dev/null || echo "")"
+  SWIFTC_BIN="$(which swiftc 2>/dev/null || echo "/Library/Developer/CommandLineTools/usr/bin/swiftc")"
+  if [[ -d "$CLT_DIR/usr/lib/swift/pm/ManifestAPI/PackageDescription.swiftmodule" ]]; then
+    if ls "$CLT_DIR"/usr/lib/swift/pm/ManifestAPI/PackageDescription.swiftmodule/*.private.swiftinterface >/dev/null 2>&1; then
+      TOOL_CACHE="$SCRIPT_DIR/.build/toolchain"
+      mkdir -p "$TOOL_CACHE/ManifestAPI"
+      if [[ ! -f "$TOOL_CACHE/ManifestAPI/PackageDescription.swiftmodule" ]]; then
+        "$SWIFTC_BIN" -frontend -compile-module-from-interface \
+          "$CLT_DIR/usr/lib/swift/pm/ManifestAPI/PackageDescription.swiftmodule/arm64-apple-macos.swiftinterface" \
+          -o "$TOOL_CACHE/ManifestAPI/PackageDescription.swiftmodule" \
+          -module-name PackageDescription \
+          -sdk "$CLT_DIR/SDKs/MacOSX.sdk" 2>/dev/null || true
+      fi
+      if [[ -f "$TOOL_CACHE/ManifestAPI/PackageDescription.swiftmodule" ]]; then
+        cat << EOF > "$TOOL_CACHE/swiftc"
+#!/usr/bin/env bash
+TOOL_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+exec "$SWIFTC_BIN" -I "\$TOOL_DIR/ManifestAPI" "\$@"
+EOF
+        chmod +x "$TOOL_CACHE/swiftc"
+        export SWIFT_EXEC="$TOOL_CACHE/swiftc"
+      fi
+    fi
+  fi
+fi
+
+# Patch lottie-ios @Entry macro if needed when building with standalone CLT (which lacks SwiftUIMacros)
+patch_lottie_macros() {
+  local p1="$SCRIPT_DIR/.build/checkouts/lottie-ios/Sources/Private/EmbeddedLibraries/EpoxyCore/SwiftUI/EpoxySwiftUIIntrinsicContentSizeInvalidator.swift"
+  local p2="$SCRIPT_DIR/.build/checkouts/lottie-ios/Sources/Private/EmbeddedLibraries/EpoxyCore/SwiftUI/EpoxySwiftUILayoutMargins.swift"
+  if [[ -f "$p1" ]] && grep -q '@Entry var' "$p1"; then
+    chmod +w "$p1"
+    python3 -c "
+content = open('$p1').read()
+content = content.replace(
+'''extension EnvironmentValues {
+  /// A means of invalidating the intrinsic content size of the parent \`EpoxySwiftUIHostingView\`.
+  @Entry var epoxyIntrinsicContentSizeInvalidator = EpoxyIntrinsicContentSizeInvalidator(invalidate: { })
+}''',
+'''private struct EpoxyIntrinsicContentSizeInvalidatorKey: EnvironmentKey {
+  static let defaultValue = EpoxyIntrinsicContentSizeInvalidator(invalidate: { })
+}
+
+extension EnvironmentValues {
+  var epoxyIntrinsicContentSizeInvalidator: EpoxyIntrinsicContentSizeInvalidator {
+    get { self[EpoxyIntrinsicContentSizeInvalidatorKey.self] }
+    set { self[EpoxyIntrinsicContentSizeInvalidatorKey.self] = newValue }
+  }
+}''')
+open('$p1', 'w').write(content)
+" 2>/dev/null || true
+  fi
+  if [[ -f "$p2" ]] && grep -q '@Entry var' "$p2"; then
+    chmod +w "$p2"
+    python3 -c "
+content = open('$p2').read()
+content = content.replace(
+'''extension EnvironmentValues {
+  /// The layout margins of the parent \`EpoxySwiftUIHostingView\`, else zero if there is none.
+  @Entry var epoxyLayoutMargins = EdgeInsets()
+}''',
+'''private struct EpoxyLayoutMarginsKey: EnvironmentKey {
+  static let defaultValue = EdgeInsets()
+}
+
+extension EnvironmentValues {
+  var epoxyLayoutMargins: EdgeInsets {
+    get { self[EpoxyLayoutMarginsKey.self] }
+    set { self[EpoxyLayoutMarginsKey.self] = newValue }
+  }
+}''')
+open('$p2', 'w').write(content)
+" 2>/dev/null || true
+  fi
+}
+patch_lottie_macros
+
 echo "Building Tandem ($BUILD_CONFIGURATION)..."
 swift build --package-path "$SCRIPT_DIR" -c "$BUILD_CONFIGURATION"
 BIN_DIR="$(swift build --package-path "$SCRIPT_DIR" -c "$BUILD_CONFIGURATION" --show-bin-path)"
