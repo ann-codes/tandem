@@ -153,8 +153,15 @@ extension QualityCheck {
         var commands: [EditCommand] = []
         let wanted = problems.filter { !$0.kind.isNote }.sorted { $0.start > $1.start }
         let jumps = wanted.filter { $0.kind == .doubleJump }.flatMap { problem in (problem.fix.map { [$0] } ?? []) + (problem.moreFixes ?? []) }
-        let rest = wanted.filter { $0.kind != .doubleJump }.compactMap(\.fix)
-        for fix in jumps + rest where !commands.contains(fix) {
+        // Slips last: a double jump's patch sets a shot's source start
+        // outright (keeping its file where it was on the timeline), so a
+        // slip before one would be undone, and a hold's range is the
+        // timeline time the check saw the flash at, which a slip would move
+        // the flash away from. Held by media time, a hold made first stays
+        // on the flash through the slip.
+        let slips = wanted.filter { $0.kind == .pictureOffVoice }.compactMap(\.fix)
+        let rest = wanted.filter { $0.kind != .doubleJump && $0.kind != .pictureOffVoice }.compactMap(\.fix)
+        for fix in jumps + rest + slips where !commands.contains(fix) {
             commands.append(fix)
         }
         return commands
@@ -178,14 +185,16 @@ extension QualityCheck {
     /// What a batch of `commands(fixing:)` is called in the history.
     public static func fixLabel(for problems: [CheckProblem]) -> String {
         let fixed = problems.filter { !$0.kind.isNote && $0.fix != nil }
-        let jumps = fixed.contains { $0.kind == .doubleJump }
-        let holds = fixed.contains { $0.kind != .doubleJump }
-        switch (holds, jumps) {
-        case (true, true): return "\(holdLabel), and \(doubleJumpLabel.prefix(1).lowercased())\(doubleJumpLabel.dropFirst())"
-        case (false, true): return doubleJumpLabel
-        default: return holdLabel
-        }
+        var parts: [String] = []
+        if fixed.contains(where: { $0.kind == .pictureOffVoice }) { parts.append(pictureOffVoiceLabel) }
+        if fixed.contains(where: { $0.kind != .doubleJump && $0.kind != .pictureOffVoice }) { parts.append(holdLabel) }
+        if fixed.contains(where: { $0.kind == .doubleJump }) { parts.append(doubleJumpLabel) }
+        guard let first = parts.first else { return holdLabel }
+        return ([first] + parts.dropFirst().map { $0.prefix(1).lowercased() + $0.dropFirst() }).joined(separator: ", and ")
     }
+
+    /// The label for a batch of `pictureOffVoice` fixes.
+    public static let pictureOffVoiceLabel = "Put the picture back in step with the voice"
 }
 
 /// A double jump `doubleJumps` found, before it's worded: `clip`'s `edge`
@@ -521,17 +530,7 @@ private struct TakePicture {
     /// Whether the clip covers the whole frame at `time` (inside it or at
     /// its end), opaque, as it's placed then.
     func covers(_ clip: Clip, at time: Time) -> Bool {
-        let video = clip.resolvedVideo(at: time - clip.start)
-        guard video.opacity >= 0.99, video.cutout?.enabled != true else { return false }
-        // A quarter turn leaves corners uncovered; whole and half turns
-        // cover what the box says.
-        let turn = video.transform.rotation.truncatingRemainder(dividingBy: 180)
-        guard abs(turn) < 0.01 || abs(abs(turn) - 180) < 0.01 else { return false }
-        guard let box = QualityCheck.onScreen(clip, item: clip.mediaID.flatMap { media[$0] }, at: time, in: project) else { return false }
-        // A pixel's slack: a shot zoomed to just fill the frame lands a hair
-        // inside it.
-        let slackX = 1 / Double(max(project.settings.width, 1)), slackY = 1 / Double(max(project.settings.height, 1))
-        return box.x0 <= slackX && box.y0 <= slackY && box.x1 >= 1 - slackX && box.y1 >= 1 - slackY
+        QualityCheck.fillsFrame(clip, item: clip.mediaID.flatMap { media[$0] }, at: time, in: project)
     }
 
     /// Whether something other than `except` hides the take at `time`: a

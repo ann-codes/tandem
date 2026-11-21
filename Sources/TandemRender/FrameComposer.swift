@@ -22,19 +22,22 @@ struct SceneClip {
     /// directly when AVFoundation can't (see `FrameRecovery`).
     var picture: SourceTrack?
     var matte: SourceTrack?
-    /// Timeline stretches where AVFoundation's frames for this clip are
-    /// wrong: the clip starts on leading frames it can't decode, so it
-    /// shows a stale frame or nothing until the next keyframe.
+    /// Timeline stretches where the composition track has no frames for
+    /// this clip and the compositor decodes them itself: a freeze frame's
+    /// whole length, or the clip starting on leading frames AVFoundation
+    /// can't decode (it'd show a stale frame or nothing until the next
+    /// keyframe).
     var pictureRecovery: TimeRange?
     var matteRecovery: TimeRange?
 
-    /// Media time shown at a timeline time, following speed and freezes.
+    /// Media time shown at a timeline time, following speed, freezes and
+    /// held frames.
     /// The file's time at a timeline time; before the file starts (a
     /// transition into a clip used from its first frame) that's its first
     /// frame, held. A file whose picture lags its sound shows its picture
     /// that much later (`MediaItem.pictureDelay`), as the plan does.
     func mediaTime(at time: Time) -> CMTime {
-        let t = clip.freezeFrame ? clip.sourceStart : clip.sourceStart + (time - clip.start).scaled(by: clip.speed)
+        let t = clip.pictureTime(atTimelineTime: time)
         return max(t + (media?.pictureDelay ?? .zero), .zero).cmTime
     }
 }
@@ -294,15 +297,19 @@ struct FrameComposer {
         if stills, !direct, let map = source?.leading {
             direct = map.window(containing: Time(cmTime: clip.mediaTime(at: time))) != nil
         }
-        if direct, let image = recovered(source, clip, at: time) { return image }
+        if direct { return recovered(source, clip, at: time) ?? sources.frame(track: track) }
         return sources.frame(track: track) ?? recovered(source, clip, at: time)
     }
 
-    /// The frame at a clip's media time, decoded directly.
+    /// The frame at a clip's media time, decoded directly. A freeze frame's
+    /// is kept, as it shows on every frame of the clip.
     func recovered(_ source: SourceTrack?, _ clip: SceneClip, at time: Time) -> CIImage? {
-        guard let source, let recovery = scene.recovery,
-              let pixels = recovery.frame(source, at: clip.mediaTime(at: time)) else { return nil }
-        return CIImage(cvPixelBuffer: pixels)
+        guard let source, let recovery = scene.recovery else { return nil }
+        let media = clip.mediaTime(at: time)
+        guard let pixels = clip.clip.freezeFrame
+            ? recovery.still(source, at: media)
+            : recovery.frame(source, at: media) else { return nil }
+        return CIImage(cvPixelBuffer: HDRFrames.shared.sdr(pixels))
     }
 
     /// A decoded frame turned the right way up, origin at 0, 0.

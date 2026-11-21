@@ -23,10 +23,23 @@ final class TandemInstruction: NSObject, AVVideoCompositionInstructionProtocol, 
         self.stack = stack
         self.scene = scene
         self.trackIDs = trackIDs
+        // Not the tracks of layers the compositor decodes itself here (a
+        // freeze frame): those tracks are empty, and a reader waiting on
+        // them could stall before the compositor is asked for a frame.
+        let range = range
+        func decodedDirectly(_ recovery: TimeRange?) -> Bool {
+            guard let recovery else { return false }
+            return recovery.start <= range.start && range.end <= recovery.end
+        }
         var needed = Set<CMPersistentTrackID>()
         for node in stack {
             for layer in node.layers {
-                for pool in [layer.pictureTrack, layer.matteTrack].compactMap({ $0 }) where trackIDs.indices.contains(pool) {
+                let clip = scene.clips[layer.clipID]
+                let used = [
+                    decodedDirectly(clip?.pictureRecovery) ? nil : layer.pictureTrack,
+                    decodedDirectly(clip?.matteRecovery) ? nil : layer.matteTrack
+                ]
+                for pool in used.compactMap({ $0 }) where trackIDs.indices.contains(pool) {
                     needed.insert(trackIDs[pool])
                 }
             }
@@ -57,12 +70,19 @@ class TandemCompositor: NSObject, AVVideoCompositing {
         super.init()
     }
 
+    /// HDR frames come as they are, and `HDRFrames` converts them, the
+    /// same way for the player, frame grabs and exports.
+    var supportsHDRSourceFrames: Bool { true }
+
     var sourcePixelBufferAttributes: [String: any Sendable]? {
         [
             // Decoders' native formats, so frames arrive without conversion.
             kCVPixelBufferPixelFormatTypeKey as String: [
                 kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
                 kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                // 8 bits for HDR too: taking 10-bit HLG as it's decoded moved
+                // exports' highlights by 4 to 6 levels from what they've
+                // always been (`HDRFrames`).
                 kCVPixelFormatType_32BGRA
             ],
             kCVPixelBufferMetalCompatibilityKey as String: true,
@@ -182,6 +202,15 @@ final class TandemUtilityCompositor: TandemCompositor {
     override class var renderQoS: DispatchQoS { .utility }
 }
 
+extension AVVideoComposition {
+    /// This composition drawn by `compositor` instead.
+    func drawn(by compositor: TandemCompositor.Type) -> AVVideoComposition {
+        let composition = mutableCopy() as! AVMutableVideoComposition
+        composition.customVideoCompositorClass = compositor
+        return composition
+    }
+}
+
 /// Source frames from an AVFoundation request.
 struct RequestSources: FrameSources {
     let request: AVAsynchronousVideoCompositionRequest
@@ -189,7 +218,7 @@ struct RequestSources: FrameSources {
 
     func frame(track: Int) -> CIImage? {
         guard trackIDs.indices.contains(track), let buffer = request.sourceFrame(byTrackID: trackIDs[track]) else { return nil }
-        return CIImage(cvPixelBuffer: buffer)
+        return CIImage(cvPixelBuffer: HDRFrames.shared.sdr(buffer))
     }
 }
 

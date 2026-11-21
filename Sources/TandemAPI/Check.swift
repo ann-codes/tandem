@@ -60,13 +60,13 @@ public struct CheckRequest: ServiceCall {
     }
 
     public func run(on service: TandemService, context: CallContext) async throws -> CheckResult {
-        try await service.withPresetFonts(try service.prepareCheck(self))()
+        try await service.withPresetFonts(try service.prepareCheck(self, author: context.author))()
     }
 }
 
 extension CheckRequest: DeferredServiceCall {
     public func prepare(on service: TandemService, context: CallContext) throws -> @Sendable () async throws -> CheckResult {
-        service.withPresetFonts(try service.prepareCheck(self))
+        service.withPresetFonts(try service.prepareCheck(self, author: context.author))
     }
 }
 
@@ -91,8 +91,10 @@ public struct CheckResult: Codable, Sendable {
     /// With `cuts`: how many cut edges on the speech tracks were checked.
     public var cuts: Int?
     /// The edits that fix what the check can fix: with `cuts`, the trims
-    /// that move each clipped edge into its pause, latest first; otherwise
-    /// the `updateClip` that runs each double jump's shot out to its cut,
+    /// that move each clipped edge into its pause, latest first (never a
+    /// `putBack`, which brings cut words back and is offered on its own);
+    /// otherwise the `updateClip` that runs each double jump's shot out to
+    /// its cut, then the `slip` that puts each picture back on its voice,
     /// then a `holdFrame` for each flicker it can tell the picture of,
     /// latest first. Pass them to `apply` with `revision`.
     public var commands: [EditCommand]
@@ -176,6 +178,9 @@ extension CheckResult: ReadableResult {
             ?? (privacy == true ? "\(frames) frames read" : frames > 0 ? "\(frames) frames" : "quick: no frames rendered")
         let verdict = problems.isEmpty ? "no problems." : "\(problems.count) problem\(problems.count == 1 ? "" : "s"):"
         var lines = ["Checked \(stretches) (\(scanned)) in \(String(format: "%.1f", seconds)) s: \(verdict)"]
+        // Each put-back offered once: both sides of a join can name the
+        // same trim.
+        var offered: [EditCommand] = []
         func line(_ problem: CheckProblem) -> String {
             let when = problem.start == problem.end ? "\(problem.start)" : "\(problem.start)-\(problem.end)"
             var line = "  \(when)  \(problem.message)"
@@ -192,12 +197,32 @@ extension CheckResult: ReadableResult {
                 let expect = revision.map { " --expect \($0)" } ?? ""
                 line += "\n    hide it: tandem apply\(expect) --label \"Blur private text\" '\(json)'"
             }
+            // Putting a cut back undoes what may be a cut made on purpose,
+            // so it's never in the Fix batch: it's offered here, on its own.
+            if !problem.kind.isNote, problem.cut?.fixKind == .putBack, let fix = problem.cut?.fix, !offered.contains(fix) {
+                offered.append(fix)
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+                let json = (try? encoder.encode([fix])).map { String(decoding: $0, as: UTF8.self) } ?? "[]"
+                let expect = revision.map { " --expect \($0)" } ?? ""
+                line += "\n    puts back the cut words: tandem apply\(expect) --label \"Put back a cut\" '\(json)'"
+            }
             return line
         }
         lines += problems.map(line)
         if !notes.isEmpty {
             lines.append("Notes (not problems):")
             lines += notes.map(line)
+            // The hand-back asks for a reason for each note that stays, by
+            // its kind, which the lines above don't name.
+            if privacy != true {
+                let kept = notes.filter { $0.kind != .heardWhole }
+                var named = kept.prefix(6).map { "\($0.kind.rawValue) \($0.start)" }
+                if kept.count > named.count { named.append("\(kept.count - named.count) more") }
+                if !named.isEmpty {
+                    lines.append("Fix each note, or say why it stays when you hand back: --reason \"<kind> <time> <why>\" (\(named.joined(separator: "; "))).")
+                }
+            }
         }
         if let listened {
             // Every join's words, so an agent can read each one as the Ian
@@ -232,8 +257,41 @@ extension TandemService {
     /// Works out what to check from the open project and returns the slow
     /// part (rendering the frames), so a headless caller can close the
     /// project first.
-    public func prepareCheck(_ request: CheckRequest) throws -> @Sendable () async throws -> CheckResult {
-        let project = coordinator.project
+    ///
+    /// Each check is kept in the edit history once it's done (`CheckRun`),
+    /// with what it covered and found, for `handback`'s gate.
+    public func prepareCheck(_ request: CheckRequest, author: String = "agent") throws -> @Sendable () async throws -> CheckResult {
+        let (project, revision) = coordinator.snapshot()
+        let log = session.review.log
+        let (ranges, note) = try checkRanges(request, project: project, log: log)
+        let work = try prepareCheck(request, project: project, ranges: ranges, note: note)
+        let mode: CheckRun.Mode = request.privacy == true ? .privacy : request.listen == true ? .listen : request.cuts == true ? .cuts : request.quick == true ? .quick : .full
+        let scope: CheckRun.Scope = request.changed == true ? .changed : request.from == nil && request.to == nil ? .timeline : .stretch
+        let covers: [Int]
+        switch mode {
+        case .full: covers = CheckRun.covered(by: ranges, log: log, in: project, takeCutsOnly: false)
+        case .cuts, .listen: covers = CheckRun.covered(by: ranges, log: log, in: project, takeCutsOnly: true)
+        case .quick, .privacy: covers = []
+        }
+        let history = session.history
+        return {
+            let result = try await work()
+            // A listen check that had nothing to listen with, or couldn't
+            // hear some joins (the engine failed, or the take's words there
+            // aren't known), only read the levels there, so it counts as the
+            // cuts check it was.
+            let unheard = result.listened?.joins.contains { $0.skipped == "couldn't listen" || $0.skipped == "no transcript" } ?? true
+            let ran = mode == .listen && unheard ? .cuts : mode
+            let run = CheckRun(scope: scope, mode: ran, ranges: ranges, problems: result.problems.count, found: result.problems.map(CheckRun.Note.init), notes: result.notes.map(CheckRun.Note.init), covers: covers)
+            var record = HistoryRecord(revision: revision, kind: .check, label: run.command, author: author)
+            record.check = run
+            history.note(record)
+            return result
+        }
+    }
+
+    /// What a check looks at, and why it's nothing when it is.
+    func checkRanges(_ request: CheckRequest, project: Project, log: ReviewLog) throws -> (ranges: [TimeRange], note: String?) {
         let timeline = TimeRange(start: .zero, end: project.duration)
         var ranges: [TimeRange] = []
         var note: String?
@@ -241,7 +299,7 @@ extension TandemService {
             if request.from != nil || request.to != nil {
                 throw ServiceError(.badRequest, "Check what changed, or a stretch with from and to, not both.")
             }
-            ranges = session.review.log.changedRegions(in: project).compactMap { region in
+            ranges = log.changedRegions(in: project).compactMap { region in
                 TimeRange(start: region.start - Self.checkMargin, end: region.end + Self.checkMargin).intersection(timeline)
             }
             if ranges.isEmpty { note = "Nothing is waiting for Mike's review, so there was nothing to check." }
@@ -252,7 +310,10 @@ extension TandemService {
             guard end > start else { throw ServiceError(.badRequest, "Nothing to check between \(start) and \(end): the timeline is \(project.duration) long.") }
             ranges = [TimeRange(start: start, end: end)]
         }
-        ranges = QualityCheck.merge(ranges)
+        return (QualityCheck.merge(ranges), note)
+    }
+
+    private func prepareCheck(_ request: CheckRequest, project: Project, ranges: [TimeRange], note: String?) throws -> @Sendable () async throws -> CheckResult {
         if request.privacy == true {
             if request.quick == true || request.cuts == true || request.listen == true {
                 throw ServiceError(.badRequest, "A privacy check is a check of its own: it doesn't go with quick, cuts or listen.")
@@ -362,8 +423,12 @@ extension TandemService {
         let pauseMap = speech.words.isEmpty ? nil : TranscriptTools.speechMap(project, analysis: self.analysis)
         let cache = CheckCache(folder: folder)
         let analysis = self.analysis
+        // The answers in the claims list (`tandem claims`): a claim answered
+        // with why nothing needs showing isn't noted bare.
+        let claimAnswers = Self.claimAnswers(for: session.fileURL, warnings: &warnings)
         let notices = warnings
         let revision = coordinator.revision
+        let service = self
         return {
             let started = Date()
             var frames: [FrameStats]?
@@ -393,8 +458,12 @@ extension TandemService {
                 }
             }
             var pauses: [QualityCheck.HeardPause]?
+            var taste: PauseTaste?
             if let pauseMap {
-                pauses = await Self.checkPauses(map: pauseMap, project: project, folder: projectFolder, ranges: toCheck)
+                // What Mike trimmed himself since the last check goes into
+                // his taste first, so this check already holds to it.
+                taste = (try? await service.updatePauseTaste())?.taste ?? PauseTasteStore.load()
+                pauses = await Self.checkPauses(map: pauseMap, project: project, folder: projectFolder, ranges: toCheck, taste: taste ?? PauseTaste())
             }
             // How long each join's clip runs before his first word, heard in
             // the take's sound (`LeadRoll`): his face waiting to talk.
@@ -403,9 +472,10 @@ extension TandemService {
                 words: CutCheck.words(in: project, analysis: analysis)
             ).waits
             let found = QualityCheck.problems(
-                in: project, ranges: toCheck, frames: frames, screenFrames: screenFrames, speech: speech, pauses: pauses, faceWaits: waits,
+                in: project, ranges: toCheck, frames: frames, screenFrames: screenFrames, speech: speech, pauses: pauses, taste: taste, faceWaits: waits,
                 frameTimes: frameTimes
             ) + Self.unlevelledProblems(in: project, analysis: analysis, folder: projectFolder, ranges: toCheck)
+                + QualityCheck.bareClaims(in: project, ranges: toCheck, speech: speech, answers: claimAnswers)
             var names: [String: String] = [:]
             for id in Set(found.flatMap(\.clipIDs)) {
                 guard let clip = project.clip(id) else { continue }
@@ -531,24 +601,25 @@ extension TandemService {
         }
     }
 
-    /// The pauses in `ranges` that could be mid-sentence ones to close
-    /// (`QualityCheck.midSentencePauses`), as they're heard: from the end
-    /// of the last word's sound to the start of the next one's, as
-    /// `tandem pauses` and `tighten --mid` measure them, beside the
-    /// transcript's gap (a breath is sound to tighten, but part of the
-    /// pause to Mike). A word the
-    /// transcript has where the sound has only the room is left out, as
-    /// tighten leaves it, and a gap the voice runs through isn't a pause.
-    static func checkPauses(map: TranscriptTools.SpeechMap, project: Project, folder: ProjectFolder, ranges: [TimeRange]) async -> [QualityCheck.HeardPause] {
+    /// The pauses in `ranges` that could be ones to close: mid-sentence
+    /// (`QualityCheck.midSentencePauses`) or longer than Mike leaves for
+    /// their kind (`QualityCheck.longPauses`), as they're heard: the
+    /// silence from where his voice stops to where it starts again (a
+    /// breath or a low bump is silence to him), the longest real quiet in
+    /// it, and the transcript's gap. A word the transcript has where the
+    /// sound has only the room is left out, as tighten leaves it, and a
+    /// gap the voice runs through with no silence isn't a pause.
+    static func checkPauses(map: TranscriptTools.SpeechMap, project: Project, folder: ProjectFolder, ranges: [TimeRange], taste: PauseTaste = PauseTaste()) async -> [QualityCheck.HeardPause] {
         guard let first = ranges.map(\.start).min(), let last = ranges.map(\.end).max() else { return [] }
         // Wide enough to take in a pause that only overlaps the stretches:
         // `pauses` keeps only the gaps wholly between from and to.
-        let reach = QualityCheck.midSentencePauseLongest
+        let reach = max(QualityCheck.midSentencePauseLongest, QualityCheck.longPauseLongest)
         let from = max(.zero, first - reach), to = last + reach
         let cleaned = await SoundTightening.withoutPhantoms(map, from: from, to: to, project: project, folder: folder)
-        let shortest = SoundTightening.shortestToListen(for: QualityCheck.midSentencePauseMinimum)
+        let lowest = taste.rules.map(\.flag).min() ?? QualityCheck.midSentencePauseMinimum.seconds
+        let shortest = SoundTightening.shortestToListen(for: min(QualityCheck.midSentencePauseMinimum, Time(seconds: lowest)))
         let candidates = TranscriptTools.pauses(in: cleaned.map, minimum: shortest, from: from, to: to).filter { pause in
-            SpokenPause.kind(before: pause.before, next: pause.after) != .sentence && ranges.contains { $0.overlaps(TimeRange(start: pause.start, end: pause.end)) }
+            ranges.contains { $0.overlaps(TimeRange(start: pause.start, end: pause.end)) }
         }
         guard !candidates.isEmpty else { return [] }
         let heard = await SoundTightening.listened(candidates, map: cleaned.map, project: project, folder: folder)
@@ -557,12 +628,13 @@ extension TandemService {
             guard let sound = pause.sound else {
                 return QualityCheck.HeardPause(start: pause.start, end: pause.end, before: pause.before, after: pause.after, clipIDs: pause.clipIDs)
             }
-            if sound.runsThrough { return nil }
+            if sound.runsThrough && sound.silence == nil { return nil }
             // The longest real pause in it: the span can hold a breath or a
             // click, which `tandem pauses` hears as sound.
             let quiet = sound.quiet.max { $0.duration < $1.duration } ?? TimeRange(start: sound.start, end: sound.start)
             return QualityCheck.HeardPause(
-                start: quiet.start, end: quiet.end, gap: gap, before: pause.before, after: pause.after, clipIDs: pause.clipIDs, quiets: sound.quiet
+                start: quiet.start, end: quiet.end, gap: gap, before: pause.before, after: pause.after, clipIDs: pause.clipIDs, quiets: sound.quiet,
+                silence: sound.silence
             )
         }
     }

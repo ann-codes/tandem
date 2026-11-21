@@ -178,8 +178,11 @@ extension QualityCheck {
         /// Every stretch of real quiet in it, the longest included: a click
         /// or a breath can split it.
         public var quiets: [TimeRange]
+        /// From where his voice stops to where it starts again, as he hears
+        /// it (`GapSound.silence`): a breath or a low bump in it is silence.
+        public var silence: TimeRange?
 
-        public init(start: Time, end: Time, gap: TimeRange? = nil, before: String, after: String, clipIDs: [String] = [], quiets: [TimeRange]? = nil) {
+        public init(start: Time, end: Time, gap: TimeRange? = nil, before: String, after: String, clipIDs: [String] = [], quiets: [TimeRange]? = nil, silence: TimeRange? = nil) {
             self.start = start
             self.end = end
             self.gap = gap ?? TimeRange(start: start, end: end)
@@ -187,18 +190,23 @@ extension QualityCheck {
             self.after = after
             self.clipIDs = clipIDs
             self.quiets = quiets ?? (end > start ? [TimeRange(start: start, end: end)] : [])
+            self.silence = silence
         }
 
         /// The quiet in it.
         public var quiet: Time { end - start }
-        /// How long the pause sounds: the longer of the quiet and the
-        /// transcript's gap. On the Auth v2 video "using. | The latest"
-        /// was 0.65 s between the words and 0.19 s of it quiet, the rest a
-        /// breath (-64 dB over a -80 dB room), and Mike heard all of it
-        /// as a pause.
-        public var duration: Time { max(quiet, gap.duration) }
-        /// Both, in timeline time.
-        public var range: TimeRange { TimeRange(start: min(start, gap.start), end: max(end, gap.end)) }
+        /// How long the pause sounds: the silence when it was heard, else
+        /// the longer of the quiet and the transcript's gap. On the Auth v2
+        /// video "using. | The latest" was 0.65 s between the words and
+        /// 0.19 s of it quiet, the rest a breath (-64 dB over a -80 dB
+        /// room), and Mike heard all of it as a pause.
+        public var duration: Time { silence?.duration ?? max(quiet, gap.duration) }
+        /// All of them, in timeline time.
+        public var range: TimeRange {
+            var range = TimeRange(start: min(start, gap.start), end: max(end, gap.end))
+            if let silence { range = TimeRange(start: min(range.start, silence.start), end: max(range.end, silence.end)) }
+            return range
+        }
     }
 
     /// A pause in a sentence this long or longer is a thinking pause to
@@ -225,7 +233,10 @@ extension QualityCheck {
     /// deliberate beat included.
     static func midSentenceFix(_ pause: HeardPause, from: Time, to: Time) -> String {
         let file = "/tmp/pause-\(Int((from.seconds * 1000).rounded())).json"
-        return "tandem tighten --filmora --from \(from) --to \(to) --kinds \(file), set its pauses' kind to mid, then the same with --apply"
+        // "--kinds <file>" read as a file to have already, and on the
+        // Examples Page video (18 Nov 2026) an agent wrote one by hand, which
+        // didn't read. So it says the dry run writes it.
+        return "tandem tighten --filmora --from \(from) --to \(to) --kinds \(file) (a dry run, which writes that file), set its pauses' kind to mid, then the same with --apply"
     }
 
     /// Notes for pauses of `midSentencePauseMinimum` or more, heard, in the
@@ -235,7 +246,7 @@ extension QualityCheck {
     public static func midSentencePauses(_ pauses: [HeardPause], in project: Project, ranges: [TimeRange], speech: Speech) -> [CheckProblem] {
         guard !isConversation(project, speech: speech) else { return [] }
         let found = pauses.filter { pause in
-            pause.duration >= (pause.quiet >= midSentencePauseMinimum ? midSentencePauseMinimum : midSentenceBreathyPause)
+            pause.duration >= (pause.silence != nil || pause.quiet >= midSentencePauseMinimum ? midSentencePauseMinimum : midSentenceBreathyPause)
                 && pause.duration <= midSentencePauseLongest
                 && SpokenPause.kind(before: pause.before, next: pause.after) != .sentence
                 && ranges.contains { $0.overlaps(pause.range) }

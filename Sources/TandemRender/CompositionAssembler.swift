@@ -228,11 +228,19 @@ enum CompositionAssembler {
             }
             do {
                 let leading = LeadingFrameCache.shared.map(for: u)
-                let bad = leading.flatMap { Self.undecodableStart(of: segment, in: $0) }
+                // A freeze frame isn't on the track at all: the compositor
+                // decodes its picture once and draws it on every frame. As
+                // one source frame stretched, a reader or player starting
+                // partway through it could stall before asking for a frame,
+                // and a run of them of one proxy P-frame played black (the
+                // coordinators Schedules Short, 20 Nov 2026).
                 // A segment that starts on leading frames AVFoundation can't
                 // decode from a seek (it shows a stale frame, or a reader
                 // stalls) goes in from their keyframe; the compositor decodes
                 // the frames before it directly.
+                let bad: (timeline: TimeRange, rest: PlannedSegment?)? = segment.freeze
+                    ? (segment.timeline, nil)
+                    : leading.flatMap { Self.undecodableStart(of: segment, in: $0) }
                 if let bad {
                     if let rest = bad.rest {
                         try insert(rest, into: videoTracks[segment.track], from: assetTrack, available: source.videoRange,
@@ -242,7 +250,7 @@ enum CompositionAssembler {
                     try insert(segment, into: videoTracks[segment.track], from: assetTrack, available: source.videoRange,
                                end: &videoEnds[segment.track], holdLastFrame: true, frameDuration: frameDuration)
                 }
-                let direct = SourceTrack(url: u, asset: source.asset, track: assetTrack, timeRange: source.videoRange, leading: leading)
+                let direct = SourceTrack(url: u, asset: source.asset, track: assetTrack, timeRange: source.videoRange, leading: leading, alpha: segment.alpha)
                 if segment.role == .picture {
                     pictureTransforms[segment.clipID] = source.preferredTransform
                     pictureSources[segment.clipID] = direct
@@ -383,6 +391,14 @@ enum CompositionAssembler {
         videoComposition.instructions = plan.instructions.map {
             TandemInstruction(range: $0.range, stack: $0.stack, scene: scene, trackIDs: trackIDs)
         }
+        // An AVPlayer given a video composition AVFoundation finds invalid
+        // shows no picture at all and says nothing, while exports and
+        // stills render as usual (the coordinators Shorts, 20 Nov 2026). So
+        // it's checked here, and a problem shows in the viewer's status bar
+        // and in what `tandem frame` prints.
+        if let problem = await Self.invalidity(of: videoComposition, in: composition) {
+            warnings.add("The viewer can't play this cut: AVFoundation finds \(problem). Exports and stills still render.")
+        }
 
         var built = BuiltComposition(
             composition: composition,
@@ -394,6 +410,37 @@ enum CompositionAssembler {
         )
         built.audioGains = audioGains
         return built
+    }
+
+    /// What AVFoundation's own check finds wrong with a video composition,
+    /// or nil when it plays.
+    static func invalidity(of videoComposition: AVVideoComposition, in composition: AVComposition) async -> String? {
+        final class Problems: NSObject, AVVideoCompositionValidationHandling, @unchecked Sendable {
+            var found: [String] = []
+            func span(_ range: CMTimeRange) -> String {
+                String(format: "%.4f-%.4f s", range.start.seconds, range.end.seconds)
+            }
+            func videoComposition(_ videoComposition: AVVideoComposition, shouldContinueValidatingAfterFindingInvalidValueForKey key: String) -> Bool {
+                found.append("an invalid \(key)")
+                return true
+            }
+            func videoComposition(_ videoComposition: AVVideoComposition, shouldContinueValidatingAfterFindingEmptyTimeRange timeRange: CMTimeRange) -> Bool {
+                found.append("no instruction for \(span(timeRange))")
+                return true
+            }
+            func videoComposition(_ videoComposition: AVVideoComposition, shouldContinueValidatingAfterFindingInvalidTimeRangeIn videoCompositionInstruction: any AVVideoCompositionInstructionProtocol) -> Bool {
+                found.append("an instruction with a bad time range, \(span(videoCompositionInstruction.timeRange))")
+                return true
+            }
+            func videoComposition(_ videoComposition: AVVideoComposition, shouldContinueValidatingAfterFindingInvalidTrackIDIn videoCompositionInstruction: any AVVideoCompositionInstructionProtocol, layerInstruction: AVVideoCompositionLayerInstruction, asset: AVAsset) -> Bool {
+                found.append("an instruction naming a missing track at \(span(videoCompositionInstruction.timeRange))")
+                return true
+            }
+        }
+        let problems = Problems()
+        let range = CMTimeRange(start: .zero, duration: composition.duration)
+        guard let valid = try? await videoComposition.isValid(for: composition, timeRange: range, validationDelegate: problems), !valid else { return nil }
+        return problems.found.isEmpty ? "it invalid" : problems.found.prefix(3).joined(separator: "; ")
     }
 
     /// When a segment starts on leading frames AVFoundation can't decode
@@ -420,7 +467,8 @@ enum CompositionAssembler {
     }
 
     /// Places one segment on its composition track: speed through
-    /// `scaleTimeRange`, freeze frames as one frame stretched, and media
+    /// `scaleTimeRange`, frozen sound as one frame stretched (frozen
+    /// pictures stay off the tracks, see `build`), and media
     /// that runs out holding its first or last frame (video, for a
     /// transition past the file's ends) or going quiet (audio).
     static func insert(
@@ -441,6 +489,37 @@ enum CompositionAssembler {
         let first = Time(cmTime: available.start)
         let last = Time(cmTime: available.end)
         let frame = min(frameDuration, max(last - first, Time(flicks: 1)))
+
+        // Frames held over a flash (`Clip.holds`): the stretches either side
+        // play as they would, and each held one is the millisecond of the
+        // file up to the held frame, stretched, all on this track. A whole
+        // project frame of a 60 fps file would hold two of its frames.
+        if !segment.freeze, !segment.holds.isEmpty {
+            var cursor = start
+            func play(to time: Time) throws {
+                guard time > cursor else { return }
+                var part = segment
+                part.holds = []
+                part.timeline = TimeRange(start: cursor, end: time)
+                part.sourceStart = segment.sourceStart + (cursor - start).scaled(by: segment.speed > 0 ? segment.speed : 1)
+                try insert(part, into: track, from: source, available: available, end: &trackEnd, holdLastFrame: holdLastFrame, frameDuration: frameDuration)
+                cursor = time
+            }
+            for hold in segment.holds.sorted(by: { $0.timeline.start < $1.timeline.start }) {
+                guard let held = hold.timeline.intersection(TimeRange(start: cursor, end: end)), !held.isEmpty else { continue }
+                try play(to: held.start)
+                // Ending at the held time, which is before the flash, so it
+                // can't reach into it whatever the file's frame times.
+                let still = min(Time(seconds: 0.001), frame)
+                let at = min(max(hold.frame - still, first), last - still)
+                try track.insertTimeRange(TimeRange(start: at, duration: still).cmTimeRange, of: source, at: held.start.cmTime)
+                track.scaleTimeRange(TimeRange(start: held.start, duration: still).cmTimeRange, toDuration: held.duration.cmTime)
+                trackEnd = held.end
+                cursor = held.end
+            }
+            try play(to: end)
+            return
+        }
 
         if segment.freeze {
             let at = min(max(segment.sourceStart, first), last - frame)

@@ -31,6 +31,25 @@ final class CutListenTests: XCTestCase {
         XCTAssertEqual(join.findings, [], "\(join.findings)")
     }
 
+    func testAWordWithANumberInItHeardAsWordsIsWhole() {
+        // The Examples Page video (18 Nov 2026): the take's transcript wrote
+        // "little3D", Bark heard "little three D", with the join's bar
+        // between "three" and "D", and the check called it cut off.
+        let join = CutListen.compare(said: words("build this whole little3D | world with robots"),
+                                     heard: words("build this whole little three | D world with robots"), at: 10)
+        XCTAssertEqual(join.findings, [], "\(join.findings)")
+        XCTAssertEqual(CutListen.canonical("3D"), "threed")
+        // With the D cut off it's still cut off, not near by an ending.
+        let cut = CutListen.compare(said: words("build this whole little3D | world with robots"),
+                                    heard: words("build this whole little three | world with robots"), at: 10)
+        XCTAssertTrue(cut.clipped, "\(cut.findings)")
+        let one = CutListen.compare(said: words("build this whole little3D | world with robots"),
+                                    heard: words("build this whole little3 | world with robots"), at: 10)
+        XCTAssertTrue(one.clipped, "\(one.findings)")
+        XCTAssertEqual(CutListen.canonical("mp4"), "mpfour")
+        XCTAssertEqual(CutListen.canonical("2026"), "twothousandtwentysix")
+    }
+
     func testAKeptWordHeardCutShortIsClipped() throws {
         let join = CutListen.compare(said: words("we can extract | the data"), heard: words("we can extra | the data"), at: 10)
         let finding = try XCTUnwrap(join.findings.first)
@@ -50,6 +69,36 @@ final class CutListenTests: XCTestCase {
         XCTAssertEqual(the.findings.map(\.kind), [.notHeard])
         XCTAssertTrue(try XCTUnwrap(the.findings.first).slip)
         XCTAssertFalse(the.clipped)
+    }
+
+    func testARestartTheCutDroppedIsntACutOff() {
+        // Coordinators 0:13.712: "is. So I'm just gonna, uh. | so I'm just
+        // gonna", cut at the onset of the first "So", which the transcript
+        // has mostly before the edge.
+        let said = words("my opinion is. So | so i'm just gonna")
+        let join = CutListen.compare(said: said, heard: words("my opinion is | so i'm just gonna"), at: 10,
+                                     cutPast: ["So", "I'm"], cutBefore: ["gonna,", "uh."])
+        XCTAssertEqual(join.findings, [], "\(join.findings)")
+        // Not heard on the other side either: both are missing, so it stands.
+        let neither = CutListen.compare(said: said, heard: words("my opinion is | i'm just gonna"), at: 10,
+                                        cutPast: ["So", "I'm"], cutBefore: ["gonna,", "uh."])
+        XCTAssertEqual(neither.findings.map(\.said), ["So", "so"])
+    }
+
+    func testAKeptWordSaidAgainAfterTheJoinIsStillCutOff() {
+        // A kept "stop." cut short, with "Stop the recording" after the join:
+        // the cut doesn't start "stop. the", so it isn't a restart.
+        let join = CutListen.compare(said: words("I said stop. | Stop the recording"), heard: words("I said | Stop the recording"), at: 10,
+                                     cutPast: ["stop.", "uh"], cutBefore: ["uh"])
+        XCTAssertTrue(join.clipped, "\(join.findings)")
+        // Nor is a word the cut starts with but the other side doesn't.
+        let other = CutListen.compare(said: words("what my opinion | so i'm just"), heard: words("what my | so i'm just"), at: 10,
+                                      cutPast: ["opinion", "is."])
+        XCTAssertTrue(other.clipped, "\(other.findings)")
+        // A longer word restarted can leave a piece the engine misses.
+        let long = CutListen.compare(said: words("we can extract | extract the data"), heard: words("we can | extract the data"), at: 10,
+                                     cutPast: ["extract", "the"])
+        XCTAssertTrue(long.clipped, "\(long.findings)")
     }
 
     func testAFragmentOfACutWordIsClipped() throws {

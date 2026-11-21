@@ -1,6 +1,6 @@
 # Review, checks and history
 
-What `tandem check` looks for (including clipped words at cuts), seeing what changed with `diff` and `history`, putting clips back with `restore`, doing Mike's comments, review clips, and working in turns with Mike.
+What `tandem check` looks for (including clipped words at cuts), seeing what changed with `diff` and `history`, putting clips back with `restore`, doing Mike's comments, how a video's review went with `rounds`, review clips, and working in turns with Mike.
 
 ## Check an edit before handing it back
 
@@ -20,9 +20,16 @@ their own beside it, and reports, with the clips on screen there:
   it comes with the `holdFrame` that holds the frame before it over it, as
   Mike fixed a one-frame jump in a screen recording in the Tandem video;
   the last line is a `tandem apply` that makes them all. One at a cut is
-  usually a frame of the wrong shot: trim it instead;
+  usually a frame of the wrong shot: trim it instead. The frames are read
+  in 10 s pieces side by side, and with HDR video (an iPhone's HLG take)
+  each piece starts a second early, since AVFoundation's HDR to SDR
+  conversion makes a reader's first frame brighter: on the workbench short
+  that showed as a flicker at every 10 s mark;
 - green screen that didn't key, and flat white blocks that come and go
-  (a key or matte that failed);
+  (a key or matte that failed), where something on screen could have a
+  key or matte: not over B-roll or a screen recording with no cutout on,
+  which is footage shown as it is (a web page's white ad slot, a quiz's
+  green right answer);
 - double jumps: full-frame B-roll (or a solid) over the take that starts
   within 0.75 s after a cut in the take or ends within 0.75 s before one,
   so the viewer sees the camera change and a few frames later the shot,
@@ -65,6 +72,18 @@ their own beside it, and reports, with the clips on screen there:
   talking at the same time. It seems a bit odd" (30 Oct 2026). A copy
   under a blur (the fill behind a shot that doesn't cover the frame) is
   left out. Read from the timeline, so it's in a quick check;
+- picture off the voice (`pictureOffVoice`): a camera clip (a camera file,
+  or a clip linked with the sound) and a clip of the same file on a sound
+  track under it, playing it at moments more than half a frame apart, so
+  the lips are out of step with the words. On the workbench short (19 Nov
+  2026) a linked ripple trim after a `holdFrame` (which then cut the clip
+  into pieces) left the camera 0.2 to 0.4 s behind the voice from 0:10 to
+  the end; Mike saw the lips, and
+  nothing in the check, `--cuts`, `--listen` or `sync --check` did. Held
+  frames are left out. When one voice clip covers the camera clip, it
+  comes with the `slip` that puts the picture back on the voice's offset;
+  otherwise rebuild the picture from the voice's clips. Read from the
+  timeline, so it's in a quick check;
 - a levelled clip whose file isn't measured (`unlevelled`): a clip with
   `audio.normalizeTo` plays and exports at its file's own level until the
   file's loudness is measured, so a bed meant for -45 LUFS is as loud as
@@ -156,6 +175,14 @@ their own beside it, and reports, with the clips on screen there:
     stretches. Mike's finished solo edits cover 35 to 86%; the Exact demo's
     first hand-back covered 19%, and he asked "How come you aren't adding
     the B-roll as usual?" Not in Shorts or conversations.
+  - bare claims (`bareClaim`): a line from `tandem claims` (it names
+    something or makes a claim) said with the camera full screen and
+    nothing over more than half of it, unless its answer in the claims
+    file is a `skip`. A `shot` planned but not placed yet is still noted,
+    and says so. Not in Shorts, whose picture has its own rules and whose
+    claims are proven in the video they're cut from, or conversations.
+    Mike's finished edits had one or two each, six on the Let's Build It
+    technical video ([B-roll](broll-and-titles.md#show-what-he-says-the-proof-list)).
   - mid-sentence pauses (`midSentencePause`): a pause of 0.5 s or more
     (up to 3 s, past which it's a beat for something on screen) in the
     middle of a sentence or after a comma. Its length is the longer of the
@@ -180,6 +207,21 @@ their own beside it, and reports, with the clips on screen there:
     then a note says how many more to check again for. Not in
     conversations. It reads the take's sound, so it's in a quick check
     too.
+  - long pauses (`longPause`): any pause, between sentences too, whose
+    silence is at least the length Mike would trim for its kind. The
+    silence runs from where his voice stops to where it starts again, so
+    a breath, a low bump or the room's rumble in it counts, as he hears
+    it: on the Examples Page video two 0.8 s gaps read as 0.2 s between
+    sounds, nothing flagged them, and he called them "awkward silence".
+    Each kind's length comes from his own trims (`tandem pauses --taste`,
+    `PauseTaste`): what he leaves is the middle of the pauses he cut back,
+    and a pause is long from 1.6 times that (0.15 s over at least). Under
+    5 trims of a kind it's the usual: mid 0.12 s (long from 0.25 s), comma
+    0.2 s (0.4 s), sentence 0.35 s (0.6 s). Every check first reads the
+    trims he's made since the last one into his taste, so it learns as he
+    edits. The fix is `tandem tighten` over the pause with his lengths;
+    keep one only for a beat something on screen needs, with `--reason`.
+    One the mid-sentence note has is left to it, and so is one over 4 s.
   - a face waiting to talk (`faceWaits`): a join between two pieces of
     the take where the camera shows him for more than 0.1 s before his
     first word's sound ("Face waits 0.23 s before \"So, what I ended up
@@ -206,14 +248,36 @@ their own beside it, and reports, with the clips on screen there:
     agent framed his face instead: "This is not our usual way". Start the
     matte when the project is made (`tandem new` says so) and wait for it.
     Read from the timeline, so it's in a quick check.
+  - outro stings (`outroSting`): Mike asking for comments ("comment
+    below", "let me know in the comments", "leave a comment") with no
+    `Comment below` library segment within 4 s of it, or asking people to
+    like and subscribe in the last two minutes ("like and sub", "hit
+    subscribe", "make sure you subscribe.") with no `Like and subscribe`.
+    His finished videos put both on screen as he says it. The note ends
+    with the `tandem segments insert "<name>" --at <time>` that adds it.
+    A segment counts by its `template:segment:<name>` tag or its file.
+  - no wipe into the outro (`outroWipe`): the sign-off (the last run of
+    asks and goodbyes in the last quarter, "anyways", "that's all I got",
+    "thanks for watching", "cheerio") with no section card, `Convex wipe`
+    or wipe transition in the minute before it, in an edit that has
+    sections (a card, a wipe or a section marker earlier on). It gives the
+    `tandem segments insert "Convex wipe" --at <cut - 0.47>` for the last
+    join in the take before the sign-off sentence. Neither outro note is
+    made in a Short or a conversation; both read the transcript, so
+    they're in a quick check.
 
 Run `tandem check --changed` before handing an edit back: it checks only
 what agents changed that's waiting for Mike's review, half a second either
 side. It exits 1 when it finds a problem; notes never fail it. `--quick`
 skips rendering, so it only finds gaps, soft pictures, slivers, double
 jumps, swells off their cards, PiP that isn't Mike's usual, how a Short
-opens, talk cut, little B-roll, mid-sentence pauses and faces waiting to talk, and nothing that needs the screen recordings scanned (page changes,
+opens, talk cut, little B-roll, bare claims, mid-sentence pauses and faces waiting to talk, and nothing that needs the screen recordings scanned (page changes,
 low frame rates).
+
+Every check is kept in the edit history (`tandem history` lists it): the
+revision it read, what it looked at, how, its problem count and its notes.
+`tandem handback` reads them, so a check made with the app closed counts
+once it's open, and the other way round.
 
 It renders the timeline in 10 s pieces, several at once, and keeps what it
 measured in each in `.tandem/cache/check`. A piece is rendered again only
@@ -299,7 +363,12 @@ off, the margin, and its fix (`fixKind`):
 - `putBack`: no such move, and the stretch cut at that join is 2 s or
   less, so the fix puts it back, filler and all, by trimming the end of
   the clip before the join on to where the next one starts in the take.
-  On the Ian video that's what sounded right.
+  On the Ian video that's what sounded right. It's never in the check's
+  `Fix:` batch (or `commands` in `--json`), since the cut may have taken
+  those words on purpose: on the workbench short "the first time" was a
+  repeated phrase cut out. The problem names the words it brings back,
+  and its own `puts back the cut words:` line has the trim to apply once
+  you've heard the join and want them back.
 - `nothingNearby`: neither. Listen with `tandem clip` and recut it by hand.
 
 When a trim back would drop a kept word, the problem names it (`drops` in
@@ -341,8 +410,8 @@ on the Ian video's final cut after it was signed off:
   A cut that goes on through the word again ("the, like, the") is a false
   start, cut whole on purpose (`beforeFiller`).
 
-The last line is a `tandem apply` that makes every fix (in `--json`,
-`commands`, latest first, and `revision`; each problem's `cut` has
+The last line is a `tandem apply` that makes every fix but a put-back
+(in `--json`, `commands`, latest first, and `revision`; each problem's `cut` has
 `clipID`, `edge`, `margin`, `fixKind`, `to`, `fix`, and `drops` (the kept
 word a trim back would drop), `lastWordCut` (the sentence's last word,
 cut right after the clip), `firstWordCut`, `fragment` and `beforeFiller`
@@ -406,8 +475,17 @@ joins and 4 were real.
   where the take has words (the transcript's, over silence); or the take
   has the word twice there and it's heard once (a retake, or two tracks).
   A piece of a cut word ("extra" for "extract", "pub") is never explained.
+- A restart cut where the voice runs straight on ("is. So I'm just gonna,
+  uh. | so I'm just gonna", cut at the onset of the first "So") isn't a
+  finding at all: the transcript's times can put most of the cut "So"
+  before the edge, so the take reads "is. So | so", but when the words cut
+  past the edge start with the same two words the other side starts with,
+  and that side's word is heard, the missing short word is the cut, as
+  meant. Only a short word: a longer one cut part way can leave a piece
+  the engine misses.
 - A join with both a level flag and a finding (any that isn't explained
-  and isn't a slip, or a kept word at the join not heard right) is one
+  and isn't a slip, or a kept word at the join not heard right on the
+  side the flag is on) is one
   `clippedWord` problem that says both, "and heard cut off (...)", with the
   levels' fix.
 
@@ -524,9 +602,16 @@ Undo, newest first:
   ...
 Edits, newest first (kept across restarts; tandem diff --since <revision> shows what each did to the clips):
   r98  10:42:01  Quieter music  (user)  00:00.000-05:00.000 on A2 Music  1 changed
+  r97  10:41:50  tandem check --changed (rendered): 00:39.500-00:44.500, no problems, 1 note: deadAir 00:39.500  (claude)
   r97  10:41:30  Swap the server shot  (user)  00:40.000-00:44.000 on V3 B-roll  1 added, 1 removed
   r56-r95  09:58:02-10:30:12  Found new media x40  (system)
 ```
+
+An edit that adds or rewords a comment carries its words (`at 00:12.000:
+"cut the umm here"`), so they're still there after the agent that did it
+took the comment away, and each `tandem handback` is a line of its own
+(`Handed back 3 things to look at (claude)`). Neither is in histories
+written before this version.
 
 `tandem restore --from <revision, file or export>` (MCP `restore`) puts
 clips back as they were there: where they were, their trims, settings and
@@ -611,6 +696,106 @@ menu or an export, and what you hand back takes the place of what you
 handed back before. `--to` defaults to 5 s after `--at`. Then tell him in
 a line that Tandem will walk him through them, and keep the chat for
 what needs a decision.
+
+### What a hand-back waits for
+
+Agents were told to check before handing back, and often didn't; Mike's
+comments only stopped coming back once Tandem checked for a thing itself.
+So while agent edits wait for his review, `handback` with things to look
+at refuses, saying what to run, until all of these hold since the last
+agent edit:
+
+- a rendering `tandem check` (not `--quick` or `--privacy`) covered every
+  change waiting for review (`--changed` does);
+- if the round cut the take (a ripple delete or trim on a `cut` track),
+  `tandem check --changed --cuts --listen` covered those cuts too;
+- every problem and note those checks left is fixed (a later check no
+  longer finds it) or answered with a reason. Fix problems: answer one
+  only when you've looked or listened and it's a false alarm, and say
+  what you saw. The history keeps those answers, and the hand-back asks
+  you to tell Mike which they were.
+
+Mike's own edits after the check, Tandem finding new media and an agent
+only resolving comments don't count against it; any other agent edit does,
+so check again after a fix. Several checks of their own stretches can
+cover a round between them, as long as each batch's changes lie inside
+one of them (`--changed` always does), and the newest check over a batch
+is the one that counts.
+
+```bash
+tandem handback --at 3:50 --name "The build animation" --reason "deadAir 3:56 the build animation plays here"
+tandem handback '{"notes": [{"at": "3:50", "name": "The build animation"}], "reasons": [{"kind": "deadAir", "at": "3:56", "why": "the build animation plays here"}]}'
+tandem handback --at 3:50 --name "The build animation" --unchecked "Bark isn't downloaded on this Mac, so --listen can't run"
+```
+
+A reason names the problem's or note's kind and a time within about a second of its
+stretch, as the refusal lists them (`  deadAir  03:56.000-03:56.800  Dead
+air: ...` with the `--reason` to copy under it). A join `--listen` heard
+whole needs none. `--unchecked` hands back anyway and keeps your reason in
+the history; say so to Mike in your message. Nothing waiting for review,
+withdrawing (`'[]'`) and the listing are never refused, and a Short made
+with `tandem short --copy` starts with nothing waiting, so its gate is its
+own round's edits.
+
+## How the review went
+
+```
+$ tandem rounds
+Convex Auth v2: 4 review rounds, 12 Nov 11:37 to 12 Nov 16:17.
+
+Round 1: handed back 12 Nov 12:03 at r51 (inferred), 45 agent edits by claude, cli
+  Mike: 8 comments (1 reworded), the first 22 min after; 0 trims of the take, 0 other edits
+  00:22.467  [broll] We need to show something here. Is there like an early announcement page you can show...
+  00:41.633  [pauses] There's weird pause here when it's mid sentence you shouldn't have that big pause...
+  ...
+Round 4: handed back 12 Nov 16:16 at r123 (inferred), 2 agent edits by claude
+  Mike: nothing on the timeline yet (not watched, or answered in the chat)
+
+Total: 28 comments in 3 of 4 rounds, 0 trims of the take by Mike (0 edits), 0 other edits by him, 72 agent edits.
+By theme:
+  B-roll, show it, proof: 13
+  pauses and silence: 7
+  ...
+```
+
+`tandem rounds` says how a video's review went: each round's handback,
+the agent edits that went into it, Mike's comments (how many, their
+words and theme, how soon after the handback he started) and the edits
+he made himself, split into trims of the take and the rest. It's the
+record the after-video retro needs, and it tells whether a change to how
+we work paid off: on the Threadbear launch he made 42 trims of the take
+himself (114 edits) across the rounds, and the comments keep asking for
+B-roll and for mid-sentence pauses to go.
+
+Rounds end at each `tandem handback`. History from before Tandem kept
+those has its rounds inferred from who edited: a run of agent edits and
+then Mike's activity is a round he watched. That can't see a round he
+answered in the chat without touching the timeline (the Exact demo had
+seven handbacks in the chat; the history shows six rounds), which is one
+more reason to hand back every round. A last run of agent edits he hasn't
+touched shows as a round not reviewed yet.
+
+The words of older comments come from the saved files: `.tandem/backups`
+and the snapshot beside each export hold the comments on the timeline when
+they were saved, and each is matched to the "Add comment" edit between the
+last save without it and the first with it. Backups thin out over time,
+so some old comments have no words left anywhere, and it says how many.
+The themes come from a keyword classifier (the theme whose words come
+first wins), so read the comments themselves before drawing a lesson.
+
+At sign-off, before the final export, add the video to the channel's log
+and compare it with the videos before it:
+
+```
+tandem rounds --log ~/dev/convex/convex-videos/review-log.jsonl
+tail -5 ~/dev/convex/convex-videos/review-log.jsonl
+```
+
+Each line is one video (name, path, first and last dates, rounds,
+comments in each round, by theme, Mike's trims), and running it again
+replaces that video's line. Put what the comments keep asking for into
+the tandem skill, so the next video's first handback already has it.
+It only reads files, so the project can be open in the app.
 
 ## Export a review clip
 

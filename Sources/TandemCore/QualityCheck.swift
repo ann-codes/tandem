@@ -89,6 +89,10 @@ public struct CheckProblem: Codable, Equatable, Sendable {
         /// --filmora` leaves 0.8 s there, and Mike wants no big pause
         /// mid-sentence.
         case midSentencePause
+        /// A pause whose silence is longer than Mike leaves for its kind,
+        /// from his own trims (`longPauses`, `PauseTaste`): he hears it as
+        /// awkward silence.
+        case longPause
         /// A camera clip shown smaller than the frame that isn't `pipRight`
         /// or `pipLeft` with the cutout on (`offStylePip`): a framed face
         /// box, the cutout off, or a size or place of its own.
@@ -103,6 +107,22 @@ public struct CheckProblem: Codable, Equatable, Sendable {
         /// level (`TandemService.unlevelledProblems`): a bed meant for
         /// -45 LUFS as loud as the voice.
         case unlevelled
+        /// A line that names something or makes a claim (`tandem claims`),
+        /// said with the camera full screen and nothing over most of it,
+        /// and no answer saying why nothing needs showing (`bareClaims`).
+        case bareClaim
+        /// An ask for comments with no "Comment below" segment near it, or
+        /// an ask to like and subscribe near the end with no "Like and
+        /// subscribe" (`outroStings`).
+        case outroSting
+        /// A sign-off with no section card, Convex wipe or wipe transition
+        /// in the minute before it (`outroWipe`): nothing takes the viewer
+        /// into the outro.
+        case outroWipe
+        /// A camera clip and a clip of its take's sound playing the same
+        /// file at different moments, so the lips are out of step with the
+        /// words (`pictureOffVoice`). The fix slips the picture back.
+        case pictureOffVoice
 
         /// Worth knowing rather than wrong: Mike signed off softer zooms on
         /// cartoon B-roll than on screen recordings, a pause can let a point
@@ -111,7 +131,8 @@ public struct CheckProblem: Codable, Equatable, Sendable {
         public var isNote: Bool {
             self == .soft || self == .deadAir || self == .pageChange || self == .sliver || self == .lowFrameRate || self == .marginalJoin
                 || self == .heardDifferently || self == .heardWhole || self == .swellOffCard || self == .readableText || self == .shortOpening
-                || self == .cutTalk || self == .littleBRoll || self == .midSentencePause || self == .offStylePip || self == .faceWaits
+                || self == .cutTalk || self == .littleBRoll || self == .midSentencePause || self == .longPause || self == .offStylePip || self == .faceWaits
+                || self == .bareClaim || self == .outroSting || self == .outroWipe
         }
     }
 
@@ -331,10 +352,11 @@ public enum QualityCheck {
     /// changes need `screenFrames`, the screen recordings scanned on their
     /// own (`screenOnly`), and low frame rates those and `frameTimes`, the
     /// recordings' own frame times by media ID.
-    public static func problems(in project: Project, ranges: [TimeRange], frames: [FrameStats]?, screenFrames: [FrameStats]? = nil, speech: Speech? = nil, pauses: [HeardPause]? = nil, faceWaits waits: [FaceWait]? = nil, frameTimes: [String: [Time]] = [:]) -> [CheckProblem] {
+    public static func problems(in project: Project, ranges: [TimeRange], frames: [FrameStats]?, screenFrames: [FrameStats]? = nil, speech: Speech? = nil, pauses: [HeardPause]? = nil, taste: PauseTaste? = nil, faceWaits waits: [FaceWait]? = nil, frameTimes: [String: [Time]] = [:]) -> [CheckProblem] {
         let gapProblems = gaps(in: project, ranges: ranges)
         let jumps = doubleJumps(in: project, ranges: ranges)
         var found = gapProblems + softPictures(in: project, ranges: ranges) + slivers(in: project, ranges: ranges) + jumps + sameShotTwice(in: project, ranges: ranges)
+            + pictureOffVoice(in: project, ranges: ranges)
             + swellsOffCards(in: project, ranges: ranges) + offStylePip(in: project, ranges: ranges)
         if let waits {
             // Heard in the take's sound, so in a quick check too.
@@ -345,8 +367,11 @@ public enum QualityCheck {
             found += shortOpening(in: project, ranges: ranges, speech: speech)
             found += cutTalk(in: project, ranges: ranges, speech: speech)
             found += littleBRoll(in: project, ranges: ranges, speech: speech)
+            found += outroStings(in: project, ranges: ranges, speech: speech)
+            found += outroWipe(in: project, ranges: ranges, speech: speech)
             if let pauses {
                 found += midSentencePauses(pauses, in: project, ranges: ranges, speech: speech)
+                found += longPauses(pauses, taste: taste ?? PauseTaste(), in: project, ranges: ranges, speech: speech)
             }
         }
         if let frames {
@@ -597,7 +622,8 @@ public enum QualityCheck {
     }
 
     static func unkeyed(_ frames: [FrameStats], project: Project, frameDuration: Time) -> [CheckProblem] {
-        runs(of: frames.map { $0.flatGreen >= greenShare }).map { run in
+        runs(of: frames.map { $0.flatGreen >= greenShare }).compactMap { run in
+            guard couldBeAKey(frames, run, in: project) else { return nil }
             let share = run.map { frames[$0].flatGreen }.max() ?? 0
             return problem(.unkeyed, frames, run, project: project, frameDuration: frameDuration,
                            message: "Green screen: flat green covers \(percent(share)) of the frame (a key that didn't happen?).")
@@ -615,11 +641,89 @@ public enum QualityCheck {
             let least = run.map { frames[$0].flatWhite }.min() ?? 0
             let before = frames[run.lowerBound - 1].flatWhite
             let after = frames[run.upperBound].flatWhite
-            guard before < least / 3 && after < least / 3 else { return nil }
+            guard before < least / 3 && after < least / 3, couldBeAKey(frames, run, in: project) else { return nil }
             let share = run.map { frames[$0].flatWhite }.max() ?? 0
             return problem(.whiteBlock, frames, run, project: project, frameDuration: frameDuration,
                            message: "White block: a flat white patch over \(percent(share)) of the frame comes and goes in \(run.count) frame\(run.count == 1 ? "" : "s") (a key or matte that failed?).")
         }
+    }
+
+    /// Whether flat green or white over `run` could be a key or matte that
+    /// failed: something on screen there could have a green screen behind
+    /// it or a matte on it. Not when every picture is B-roll or a screen
+    /// recording with no cutout on, which is footage shown as it is: on the
+    /// Examples Page video (18 Nov 2026) that was a web page with an empty
+    /// white ad slot as a white block, and a 3D robot world and a quiz's
+    /// green right answer as a green screen, and the only way past them was
+    /// to hand back unchecked.
+    ///
+    /// Pictures under one that fills the frame, opaque, don't show, so the
+    /// camera under a full-frame web page doesn't count. Every frame of
+    /// the run is looked at, so a camera that shows for part of it counts.
+    static func couldBeAKey(_ frames: [FrameStats], _ run: Range<Int>, in project: Project) -> Bool {
+        var seen = Set<String>()
+        var shown: [Clip] = []
+        for index in run {
+            for clip in shownPictures(at: frames[index].time, in: project) where seen.insert(clip.id).inserted { shown.append(clip) }
+        }
+        return shown.isEmpty || !shown.allSatisfy { clip in
+            guard case .media(let mediaID) = clip.content, let item = project.media(mediaID) else { return false }
+            return (item.role == .broll || item.role == .screen) && !hasCutout(clip)
+        }
+    }
+
+    /// The pictures that show at `time`, top first: down to the first that
+    /// fills the frame, opaque (`fillsFrame`), and not past it.
+    static func shownPictures(at time: Time, in project: Project) -> [Clip] {
+        var shown: [Clip] = []
+        for track in project.videoTracks.reversed() where !track.hidden {
+            guard let clip = track.clip(at: time), clip.enabled else { continue }
+            if case .adjustment = clip.content { continue }
+            // Faded right out, it doesn't show.
+            if clip.resolvedVideo(at: time - clip.start).opacity <= 0.01 { continue }
+            shown.append(clip)
+            let item = clip.mediaID.flatMap { project.media($0) }
+            if case .media = clip.content, let item, !(item.hasVideo || item.kind == .image) || item.hasAlpha { continue }
+            if case .solid(let color) = clip.content, color.a < 0.99 { continue }
+            if case .text = clip.content { continue }
+            if case .graphic = clip.content { continue }
+            // In a transition the shot is part see-through, or pushing.
+            // The other clip in it shows too, from its handle.
+            let clips = Dictionary(track.clips.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            let transitions = track.transitions.filter { transition in
+                guard transition.fromClipID == clip.id || transition.toClipID == clip.id else { return false }
+                return ReviewLog.span(of: transition, clips: clips).map { $0.start <= time && time <= $0.end } ?? false
+            }
+            for transition in transitions {
+                for id in [transition.fromClipID, transition.toClipID].compactMap({ $0 }) where id != clip.id {
+                    if let other = clips[id], other.enabled { shown.append(other) }
+                }
+            }
+            if transitions.isEmpty, fillsFrame(clip, item: item, at: time, in: project) { break }
+        }
+        return shown
+    }
+
+    /// Whether the clip covers the whole frame at `time`, opaque, as it's
+    /// placed then (whether its pixels have alpha is the caller's to say).
+    static func fillsFrame(_ clip: Clip, item: MediaItem?, at time: Time, in project: Project) -> Bool {
+        let video = clip.resolvedVideo(at: time - clip.start)
+        guard video.opacity >= 0.99, video.cutout?.enabled != true else { return false }
+        // A quarter turn leaves corners uncovered; whole and half turns
+        // cover what the box says.
+        let turn = video.transform.rotation.truncatingRemainder(dividingBy: 180)
+        guard abs(turn) < 0.01 || abs(abs(turn) - 180) < 0.01 else { return false }
+        guard let box = onScreen(clip, item: item, at: time, in: project) else { return false }
+        // A pixel's slack: a shot zoomed to just fill the frame lands a hair
+        // inside it.
+        let slackX = 1 / Double(max(project.settings.width, 1)), slackY = 1 / Double(max(project.settings.height, 1))
+        return box.x0 <= slackX && box.y0 <= slackY && box.x1 >= 1 - slackX && box.y1 >= 1 - slackY
+    }
+
+    /// A cutout on in the main frame or in any other format.
+    static func hasCutout(_ clip: Clip) -> Bool {
+        guard let video = clip.video else { return false }
+        return video.cutout?.enabled == true || video.formatOverrides.values.contains { $0.cutout == true }
     }
 
     // MARK: - Screen recordings

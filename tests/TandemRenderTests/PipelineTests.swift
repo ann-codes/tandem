@@ -1,7 +1,7 @@
 import AVFoundation
 import XCTest
 import TandemCore
-import TandemMedia
+@testable import TandemMedia
 @testable import TandemRender
 
 /// Frames through the real AVFoundation path: composition, custom
@@ -330,6 +330,299 @@ final class PipelineTests: XCTestCase {
         let tracks = try await built.composition.load(.tracks)
         let valid = built.videoComposition.isValid(for: tracks, assetDuration: built.composition.duration, timeRange: CMTimeRange(start: .zero, duration: built.composition.duration), validationDelegate: nil)
         XCTAssertTrue(valid)
+    }
+
+    /// The coordinators Shorts (20 Nov 2026) ended at 66.666 s, under a
+    /// millisecond short of frame 2000. The last clip's end moves onto that
+    /// frame, so the timeline's end has to as well: with the clip running
+    /// past the last instruction AVFoundation rejects the video composition
+    /// and the viewer plays black, while export and stills look fine.
+    func testATimelineEndingJustShortOfAFrameStillPlays() async throws {
+        let media = try TestMedia()
+        try await media.movie("green.mov", seconds: 3, draw: { TestMedia.fill($1, 0, 1, 0) })
+        let end = t(2 - 0.0007)
+        let clip = Clip(id: "clip_g", content: .media(mediaID: "med_g"), start: .zero, duration: end)
+        let title = Clip(id: "clip_t", content: .text(TextContent(text: "Hi")), start: t(1), duration: end - t(1))
+        let project = smallProject(
+            video: [Track(kind: .video, name: "V1", clips: [clip]), Track(kind: .video, name: "Text", clips: [title])],
+            media: [media.item("med_g", "green.mov", seconds: 3)]
+        )
+        let built = try await CompositionBuilder.build(RenderContext(project: project, folder: media.projectFolder))
+        let tracks = try await built.composition.load(.tracks)
+        let valid = built.videoComposition.isValid(for: tracks, assetDuration: built.composition.duration, timeRange: CMTimeRange(start: .zero, duration: built.composition.duration), validationDelegate: nil)
+        XCTAssertTrue(valid, "instructions end at \(built.videoComposition.instructions.last?.timeRange.end.seconds ?? 0), tracks at \(built.composition.duration.seconds)")
+        XCTAssertEqual(built.warnings, [])
+
+        // Had it been invalid, the viewer's status bar would say so.
+        let short = AVMutableVideoComposition()
+        short.renderSize = CGSize(width: 320, height: 180)
+        short.frameDuration = CMTime(value: 1, timescale: 30)
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: CMTime(value: 1, timescale: 1))
+        short.instructions = [instruction]
+        let problem = await CompositionAssembler.invalidity(of: short, in: built.composition)
+        XCTAssertEqual(problem, "no instruction for 1.0000-2.0000 s")
+
+        let playerItem = built.makePlayerItem()
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
+        playerItem.add(output)
+        let player = AVPlayer(playerItem: playerItem)
+        player.isMuted = true
+        player.automaticallyWaitsToMinimizeStalling = false
+        await player.seek(to: CMTime(seconds: 0.5, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        player.rate = 1
+        var frames = 0
+        let started = Date()
+        while Date().timeIntervalSince(started) < 0.6 {
+            let now = output.itemTime(forHostTime: CACurrentMediaTime())
+            if output.hasNewPixelBuffer(forItemTime: now), output.copyPixelBuffer(forItemTime: now, itemTimeForDisplay: nil) != nil { frames += 1 }
+            try await Task.sleep(nanoseconds: 2_000_000)
+        }
+        player.pause()
+        XCTAssertGreaterThan(frames, 5, "frames shown while playing")
+    }
+
+    /// A dissolve longer than twice the last clip: the clip before plays its
+    /// handle on past the timeline's end, so the instructions run that far.
+    func testATransitionHandlePastTheEndStillPlays() async throws {
+        let media = try TestMedia()
+        try await media.movie("red.mov", seconds: 8, draw: { TestMedia.fill($1, 1, 0, 0) })
+        let a = Clip(id: "clip_a", content: .media(mediaID: "med_r"), start: .zero, duration: t(5), sourceStart: t(1))
+        let b = Clip(id: "clip_b", content: .media(mediaID: "med_r"), start: t(5), duration: t(0.2), sourceStart: t(6))
+        let project = smallProject(
+            video: [Track(kind: .video, name: "V1", clips: [a, b], transitions: [Transition(type: .dissolve, duration: t(1), fromClipID: "clip_a", toClipID: "clip_b")])],
+            media: [media.item("med_r", "red.mov", seconds: 8)]
+        )
+        let built = try await CompositionBuilder.build(RenderContext(project: project, folder: media.projectFolder))
+        let tracks = try await built.composition.load(.tracks)
+        let valid = built.videoComposition.isValid(for: tracks, assetDuration: built.composition.duration, timeRange: CMTimeRange(start: .zero, duration: built.composition.duration), validationDelegate: nil)
+        XCTAssertTrue(valid, "instructions end at \(built.videoComposition.instructions.last?.timeRange.end.seconds ?? 0), tracks at \(built.composition.duration.seconds)")
+    }
+
+    /// A 3 s movie of numbered frames, proxied as the app does (a keyframe
+    /// every 15 frames, P-frames between), and a context reading the proxy.
+    func proxied(_ media: TestMedia, _ project: (MediaItem) -> Project) async throws -> RenderContext {
+        let source = try await media.movie("screen.mov", seconds: 3, draw: { TestMedia.drawIndex($0, $1) })
+        let folder = media.folder.appendingPathComponent("proxy")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try await ProxyJob.run(source: source, settings: .standard, into: folder, context: JobContext(id: "proxy", kind: .proxy, scheduler: nil))
+        let assets = FakeAssets()
+        assets.proxies["med_s"] = folder.appendingPathComponent(ProxyJob.file)
+        return RenderContext(project: project(media.item("med_s", "screen.mov", seconds: 3)), folder: media.projectFolder, useProxies: true, assets: assets)
+    }
+
+    func index(_ pixels: CVPixelBuffer) -> Int {
+        TestMedia.readIndex(Bitmap(CIImage(cvPixelBuffer: pixels), size: CGSize(width: CVPixelBufferGetWidth(pixels), height: CVPixelBufferGetHeight(pixels))),
+                            in: CGRect(x: 0, y: 0, width: CVPixelBufferGetWidth(pixels), height: CVPixelBufferGetHeight(pixels)))
+    }
+
+    /// The coordinators Schedules Short (20 Nov 2026) held one screen frame
+    /// at 7:45 under 23 cuts in the talk. On the composition's track, as one
+    /// proxy P-frame stretched, a player or reader starting partway through
+    /// it could stall before asking for a frame, and showed black. A freeze
+    /// isn't on the track now: the compositor decodes its picture itself.
+    func testAReaderStartingInsideALongFreezeOfAProxyFrameGetsItsPicture() async throws {
+        let media = try TestMedia()
+        let context = try await proxied(media) { item in
+            let freeze = Clip(id: "clip_f", content: .media(mediaID: "med_s"), start: .zero, duration: t(12.87), sourceStart: t(1.3), freezeFrame: true)
+            return smallProject(video: [Track(kind: .video, name: "Screen", clips: [freeze])], media: [item])
+        }
+        let built = try await CompositionBuilder.build(context)
+        let indices = try await withDeadline(seconds: 30, "reading from 10 s") {
+            let reader = try AVAssetReader(asset: built.composition)
+            reader.timeRange = CMTimeRange(start: t(10).cmTime, end: t(10.5).cmTime)
+            let output = AVAssetReaderVideoCompositionOutput(videoTracks: try await built.composition.loadTracks(withMediaType: .video), videoSettings: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            ])
+            output.videoComposition = built.videoComposition
+            reader.add(output)
+            reader.startReading()
+            var found: [Int] = []
+            while let sample = output.copyNextSampleBuffer() {
+                if let pixels = CMSampleBufferGetImageBuffer(sample) { found.append(self.index(pixels)) }
+            }
+            return found
+        }
+        XCTAssertGreaterThan(indices.count, 10)
+        XCTAssertEqual(Set(indices), [39], "frame 39 is the one at 1.3 s")
+    }
+
+    /// Freezes of two P-frames by turns (cuts in the talk over two held
+    /// screens): the player, started partway into one, shows each picture.
+    func testThePlayerShowsFreezesOfProxyFramesByTurns() async throws {
+        let media = try TestMedia()
+        let context = try await proxied(media) { item in
+            let clips = (0..<12).map { i in
+                Clip(id: "clip_\(i)", content: .media(mediaID: "med_s"), start: t(Double(i) * 0.5), duration: t(0.5), sourceStart: t(i % 2 == 0 ? 1.3 : 1.7), freezeFrame: true)
+            }
+            return smallProject(video: [Track(kind: .video, name: "Screen", clips: clips)], media: [item])
+        }
+        let built = try await CompositionBuilder.build(context)
+        let playerItem = built.makePlayerItem()
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
+        playerItem.add(output)
+        let player = AVPlayer(playerItem: playerItem)
+        player.isMuted = true
+        player.automaticallyWaitsToMinimizeStalling = false
+        await player.seek(to: t(2.3).cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
+        player.play()
+        var shown: [(time: Double, index: Int)] = []
+        let deadline = Date().addingTimeInterval(8)
+        while Date() < deadline, player.currentTime().seconds < 4.4 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+            let now = output.itemTime(forHostTime: CACurrentMediaTime())
+            if output.hasNewPixelBuffer(forItemTime: now), let pixels = output.copyPixelBuffer(forItemTime: now, itemTimeForDisplay: nil) {
+                shown.append((now.seconds, index(pixels)))
+            }
+        }
+        player.pause()
+        XCTAssertGreaterThan(shown.count, 10, "frames shown while playing")
+        // Clips change every half second, even ones on 1.3 s (frame 39).
+        // Away from the cuts, so a frame's own timing can't blur it.
+        for frame in shown {
+            let phase = frame.time.truncatingRemainder(dividingBy: 0.5)
+            guard phase > 0.05, phase < 0.45 else { continue }
+            let expected = Int(frame.time / 0.5) % 2 == 0 ? 39 : 51
+            XCTAssertEqual(frame.index, expected, "at \(frame.time)")
+        }
+    }
+
+    /// A freeze shows one frame of its file: the one at its time, however
+    /// fast the file runs. A project frame's worth of a 60 fps file used to
+    /// play its two frames across the freeze.
+    func testAFreezeOfAFastFileShowsOneFrame() async throws {
+        let media = try TestMedia()
+        try await media.movie("fast.mov", seconds: 2, fps: 60, draw: { TestMedia.drawIndex($0, $1) })
+        let freeze = Clip(id: "clip_f", content: .media(mediaID: "med_f"), start: .zero, duration: t(2), sourceStart: t(1), freezeFrame: true)
+        let project = smallProject(video: [Track(kind: .video, name: "V1", clips: [freeze])], media: [media.item("med_f", "fast.mov", seconds: 2)])
+        let context = RenderContext(project: project, folder: media.projectFolder)
+        for time in [0.0, 0.5, 1.0, 1.9] {
+            let frame = try await grab(context, time)
+            XCTAssertEqual(TestMedia.readIndex(frame, in: CGRect(x: 0, y: 0, width: 320, height: 180)), 60, "at \(time)")
+        }
+        let frames = try await FrameScanner.scan(context, ranges: [TimeRange(start: .zero, end: t(2))], width: 64)
+        XCTAssertEqual(frames.count, 60)
+        XCTAssertTrue(QualityCheck.frameProblems(frames, in: project).isEmpty, "\(QualityCheck.frameProblems(frames, in: project).map(\.message))")
+    }
+
+    /// An HLG take (an iPhone's HDR) looks the same paused, playing and
+    /// exported, and as exports always have. AVFoundation used to convert
+    /// it brighter for stills and the player than for an export's reader
+    /// (a warm grey 154/116/78 in a still, 135/83/52 exported, 20 Nov 2026).
+    func testAnHLGTakeLooksTheSameInStillsThePlayerAndExports() async throws {
+        let fills: [(String, (CGFloat, CGFloat, CGFloat), [Int])] = [
+            ("warm", (0.6, 0.45, 0.3), [135, 83, 52]),
+            ("bright", (0.9, 0.9, 0.9), [215, 213, 213]),
+            ("dark", (0.15, 0.2, 0.1), [23, 47, 14])
+        ]
+        for (label, fill, exported) in fills {
+            let media = try TestMedia()
+            try await media.movie("hlg.mov", seconds: 2, hlg: true, draw: { _, c in TestMedia.fill(c, fill.0, fill.1, fill.2) })
+            let clip = Clip(id: "clip_h", content: .media(mediaID: "med_h"), start: .zero, duration: t(2))
+            let project = smallProject(video: [Track(kind: .video, name: "V1", clips: [clip])], media: [media.item("med_h", "hlg.mov", seconds: 2)])
+            let context = RenderContext(project: project, folder: media.projectFolder)
+            let still = try await grab(context, 1)[160, 90]
+            let playing = try await playerFrame(context, at: t(1))[160, 90]
+            let built = try await CompositionBuilder.build(context)
+            let reader = try AVAssetReader(asset: built.composition)
+            reader.timeRange = CMTimeRange(start: .zero, end: t(1.1).cmTime)
+            let output = AVAssetReaderVideoCompositionOutput(videoTracks: try await built.composition.loadTracks(withMediaType: .video), videoSettings: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            ])
+            output.videoComposition = built.videoComposition
+            reader.add(output)
+            reader.startReading()
+            var last: CVPixelBuffer?
+            while let sample = output.copyNextSampleBuffer() { last = CMSampleBufferGetImageBuffer(sample) ?? last }
+            let read = Bitmap(CIImage(cvPixelBuffer: try XCTUnwrap(last)), size: size)[160, 90]
+            for channel in 0..<3 {
+                // Near what exports have shown on Macs here; GitHub's
+                // virtual Macs decode HDR a few levels off (209 for 215 in
+                // the highlights, 20 Nov 2026), whatever the compositor does.
+                XCTAssertEqual(read[channel], exported[channel], accuracy: 8, "\(label) exported, as it always has been")
+                XCTAssertEqual(still[channel], read[channel], accuracy: 3, "\(label) still")
+                XCTAssertEqual(playing[channel], read[channel], accuracy: 3, "\(label) playing")
+            }
+        }
+    }
+
+    /// A freeze of an HDR take (an iPhone's HLG) looks like the same frame
+    /// playing, though its picture comes through the compositor's own
+    /// reader: in a still, the player and a scan.
+    func testAFreezeOfAnHLGTakeMatchesItPlaying() async throws {
+        let media = try TestMedia()
+        try await media.movie("hlg.mov", seconds: 3, hlg: true, draw: { _, c in TestMedia.fill(c, 0.6, 0.45, 0.3) })
+        let clips = [
+            Clip(id: "clip_p", content: .media(mediaID: "med_h"), start: .zero, duration: t(3)),
+            Clip(id: "clip_f", content: .media(mediaID: "med_h"), start: t(3), duration: t(1), sourceStart: t(2.5), freezeFrame: true),
+            Clip(id: "clip_e", content: .media(mediaID: "med_h"), start: t(4), duration: t(1), sourceStart: t(0.1), freezeFrame: true)
+        ]
+        let project = smallProject(video: [Track(kind: .video, name: "V1", clips: clips)], media: [media.item("med_h", "hlg.mov", seconds: 3)])
+        let context = RenderContext(project: project, folder: media.projectFolder)
+        let playing = try await grab(context, 2.5)
+        for time in [3.5, 4.5] {
+            let frozen = try await grab(context, time)
+            for (x, y) in [(40, 40), (160, 90), (280, 140)] {
+                for channel in 0..<3 {
+                    XCTAssertEqual(Int(frozen[x, y][channel]), Int(playing[x, y][channel]), accuracy: 3, "at \(time), \(x),\(y)")
+                }
+            }
+        }
+        let playerPlaying = try await playerFrame(context, at: t(2.5))
+        let playerFrozen = try await playerFrame(context, at: t(3.5))
+        for channel in 0..<3 {
+            XCTAssertEqual(Int(playerFrozen[160, 90][channel]), Int(playerPlaying[160, 90][channel]), accuracy: 3, "in the player")
+        }
+        // And read straight through, as an export or check reads.
+        let stats = try await FrameScanner.scan(context, ranges: [TimeRange(start: t(2), end: t(5))], width: 64)
+        let means = stats.map(\.luma)
+        let reference = try XCTUnwrap(means.first)
+        for (index, mean) in means.enumerated() {
+            XCTAssertEqual(mean, reference, accuracy: 0.02, "frame \(index) of the scan")
+        }
+    }
+
+    /// A freeze's picture is kept between frames, but not past its file
+    /// changing: a file replaced at the same path shows its own frame.
+    func testAFreezeShowsANewFileAtTheSamePath() async throws {
+        let media = try TestMedia()
+        try await indexMovie(media)
+        let freeze = Clip(id: "clip_f", content: .media(mediaID: "med_i"), start: .zero, duration: t(2), sourceStart: t(1))
+        var project = smallProject(video: [Track(kind: .video, name: "V1", clips: [freeze])], media: [media.item("med_i", "index.mov", seconds: 3)])
+        project.videoTracks[0].clips[0].freezeFrame = true
+        let whole = CGRect(x: 0, y: 0, width: 320, height: 180)
+        let before = try await grab(RenderContext(project: project, folder: media.projectFolder), 0.5)
+        XCTAssertEqual(TestMedia.readIndex(before, in: whole), 30)
+        let url = media.folder.appendingPathComponent("index.mov")
+        try FileManager.default.removeItem(at: url)
+        try await media.movie("index.mov", seconds: 3, draw: { TestMedia.drawIndex($0 + 100, $1) })
+        let after = try await grab(RenderContext(project: project, folder: media.projectFolder), 0.5)
+        XCTAssertEqual(TestMedia.readIndex(after, in: whole), 130)
+    }
+
+    /// Freezes stay off the composition's tracks, and the instructions
+    /// over them don't wait on those tracks.
+    func testFreezesAreDecodedNotPlacedOnTheTracks() async throws {
+        let media = try TestMedia()
+        try await indexMovie(media)
+        let clips = [
+            Clip(id: "clip_a", content: .media(mediaID: "med_i"), start: .zero, duration: t(1), sourceStart: t(0.5)),
+            Clip(id: "clip_f", content: .media(mediaID: "med_i"), start: t(1), duration: t(1), sourceStart: t(1.3), freezeFrame: true),
+            Clip(id: "clip_g", content: .media(mediaID: "med_i"), start: t(2), duration: t(1), sourceStart: t(2), freezeFrame: true)
+        ]
+        let project = smallProject(video: [Track(kind: .video, name: "V1", clips: clips)], media: [media.item("med_i", "index.mov", seconds: 3)])
+        let built = try await CompositionBuilder.build(RenderContext(project: project, folder: media.projectFolder))
+        let edits = built.composition.tracks(withMediaType: .video).flatMap(\.segments).filter { $0.sourceURL?.lastPathComponent == "index.mov" }
+        XCTAssertEqual(edits.map { Time(cmTime: $0.timeMapping.target.end) }, [t(1)], "only the playing clip")
+        for instruction in built.videoComposition.instructions where Time(cmTime: instruction.timeRange.start) >= t(1) {
+            XCTAssertEqual(instruction.requiredSourceTrackIDs?.count ?? 0, 0, "at \(instruction.timeRange.start.seconds)")
+        }
+        let invalidity = await CompositionAssembler.invalidity(of: built.videoComposition, in: built.composition)
+        XCTAssertNil(invalidity)
+        for (time, expected) in [(0.5, 30), (1.0, 39), (1.6, 39), (2.0, 60), (2.9, 60)] {
+            let frame = try await grab(RenderContext(project: project, folder: media.projectFolder), time)
+            XCTAssertEqual(TestMedia.readIndex(frame, in: CGRect(x: 0, y: 0, width: 320, height: 180)), expected, "at \(time)")
+        }
     }
 
     func testThePlayerItemPlaysThroughTheCompositor() async throws {

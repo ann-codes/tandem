@@ -92,7 +92,10 @@ rounds up.
    believe him and run `tandem loudness --from T --to T --gains`: it
    checks the render against the gain lanes and says by how much a change
    lands late.
-4. **Check.** `tandem check --changed` before you hand back. It renders
+4. **Check.** `tandem check --changed` before you hand back (Tandem
+   enforces it: `tandem handback` refuses until a rendering check, and
+   `check --changed --cuts --listen` if you cut the take, ran since your
+   last edit with no problems, and says what to run). It renders
    what you changed and finds black frames, flickers, green screen that
    didn't key, white blocks and double jumps (B-roll a few frames off a
    camera cut). A flicker it can fix (a frame jumping in a screen
@@ -129,9 +132,28 @@ rounds up.
      stops ("using. | The latest" counts). Read it in context, then run the
      `tighten --filmora --kinds` it gives, with the pause's kind set to
      `mid` (see "Pauses by kind").
+   - long pause: a pause whose silence (voice to voice, a breath or a low
+     bump counting as silence) is past what Mike trims for its kind, from
+     his own trims (`tandem pauses --taste`). Run the `tighten` it gives,
+     which takes it to what he leaves; keep one only for a beat something
+     on screen needs, with `--reason`.
    - PiP that isn't his usual: a camera clip shown small that isn't
      `pipRight`/`pipLeft` with the cutout on. Apply the layout it gives; if
      the matte isn't made yet, wait for it rather than framing his face.
+   - bare claim: a line from `tandem claims` said with only his face on
+     screen and no `skip` answer. Show it as he says it, or answer it in
+     the claims file (see "Proof on screen for every claim").
+   - outro stings and wipe: an ask for comments or likes with no `Comment
+     below` / `Like and subscribe` segment, or no wipe into the sign-off.
+     Run the `tandem segments insert` it gives.
+
+   Fix each note or give the reason it stays when you hand back
+   (`--reason "deadAir 3:56 the build animation plays here"`); the
+   hand-back lists any you haven't. A problem you've looked at or
+   listened to and found a false alarm takes a `--reason` too, saying
+   what you saw (`--reason "whiteBlock 1:08.3 an empty ad slot on the real
+   page"`); tell Mike which in your message. Don't use `--unchecked` for
+   those: it says the checks didn't run.
 5. **Hand back.** Open the project in the app for Mike with
    `open "<video folder>/<name>.tandem"` (skip it if `tandem status` says
    the app already has it open), rather than asking him to open it. Then
@@ -149,7 +171,9 @@ rounds up.
    keeping the chat for what needs a decision. Your edits stay highlighted
    on his timeline until he plays through them or marks them reviewed;
    that's his to do. Next round, `tandem handback` alone says which he
-   didn't get to, with any comment he left beside one.
+   didn't get to, with any comment he left beside one. If the checks
+   truly can't run, `--unchecked "<why>"` hands back anyway; say so to
+   Mike.
 
 ## Mike's comments
 
@@ -301,6 +325,15 @@ transitions, media or markers.
   "old convex v one. And now with this convex v2,"), so the kind is read
   from the words, never the punctuation. `tandem cut` leaves a sentence's
   0.4 s across a retake's join.
+
+  These are the starting point; his own trims now set them. Tandem reads
+  every pause he trims himself out of each project's history into his
+  pause taste (each `tandem check` does, and `tandem pauses --learn`), and
+  `tandem pauses --taste` says what he leaves for each kind and from how
+  long `check` calls one long. Use those lengths over the ones above when
+  they're learned. Judge a pause by `tandem pauses`' "heard as ... of
+  silence", which runs voice to voice with breaths and low bumps in it,
+  as he hears it (19 Nov 2026: two 0.8 s gaps had read 0.2 s by sound).
 - **The kept pause sits on the clip going out. The clip coming in starts
   a frame or two before he speaks.** Mike, Let's Build It technical, 13 Nov
   2026: "you don't start the next clip soon enough. So you end up with like
@@ -350,6 +383,24 @@ transitions, media or markers.
   and it cost a 13.7 GB re-export. One exception: a celebration line
   ("Congratulations, party time") cuts straight on, even over confetti; he
   doesn't want to sit there silently smiling.
+- **A "beat" is about 0.3 s, and even a pause he asked for is about 1 s.**
+  On the Examples Page (19 Nov 2026) I kept the dead-air notes as comic
+  beats; he cut them himself: a 0.81 s hold after "Savages, right?" down to
+  about 0.28 s, and a 2.7 s eye-shift pause (his own editor's note asked
+  for an "extended pause") down to about 1.2 s. Don't answer a dead-air
+  note with "the pause earns it" unless something moves on screen; trim it
+  to those lengths. Judge gaps by `tandem pauses`' "heard as ... of
+  silence" (voice to voice); before 19 Nov 2026 its figure ran sound to
+  sound and called two 0.8 s gaps (a sentence running on, "...engineering
+  land. | Over the past year or so") "heard as 0.2 s" because of a low
+  bump in them, and he flagged both as "awkward silence" ("I have to keep
+  telling you about these silences"). He also hears a 0.2 s mid-phrase
+  hitch ("for that | framework"): cut it to the 0.12 s mid gap.
+- **Keep a pause that carries a gesture.** Before cutting a pause, look at
+  his face in it: a shrug, a raised eyebrow, a look to camera. "You can
+  probably get rid of the cut here, because the nuance of my shrug here is
+  what I wanted to show" (Examples Page, the 0.57 s before "good job,
+  Cheffy").
 - **No clips under 2 s,** where all it takes is putting back a pause of a
   second or less between sentences. Never bring back a thinking pause or a
   long silence to do it. `tighten --filmora --min-clip 2` does this,
@@ -428,7 +479,10 @@ transitions, media or markers.
 
 Mike's words on the Convex Auth v2 video (12 Nov 2026), after a first cut
 that missed these: "It doesn't seem like you... remember the ways that we
-usually like to edit." Check each one before `tandem handback`:
+usually like to edit." Check each one before `tandem handback` (it
+refuses until `tandem check` has run on your changes, and the check notes
+bare claims and missing outro stings and wipes, but not the rest of this
+list):
 
 - **Start the cutout matte when the project is made.** PiP is `pipRight`
   with the cutout, always. A long 4K take mattes for hours, so put one
@@ -439,14 +493,22 @@ usually like to edit." Check each one before `tandem handback`:
 - **A Convex wipe at every section change,** the cold open into the first
   section included, not just into and out of demos and the outro: "Can we
   have a swipe here? ... I want section swipes, particularly the outro,
-  intro, etc."
+  intro, etc." Except where he talks straight across the change, like a
+  question answered in his next line ("do we even need the templates
+  page? ... Well, when I was in San Francisco"): "I don't need like an
+  artificial transition", Examples Page, 19 Nov 2026. And when he
+  tightens a pause at a section change himself, the wipe gets trimmed
+  with it: put it back whole, starting 0.47 s before the cut.
 - **Proof on screen for every claim, including the lines he rewrote or
   ad-libbed,** not only the script's callouts: "v2 is finally here" (the
   docs or announcement), "non-beta forever" (the old beta label), "no per
   user billing like Clerk or WorkOS" (their pricing pages), "drop it into
   your next project" (the quick start). "We need to show something here",
-  "justify what I'm saying". Read the final transcript line by line for
-  anything that names a thing or makes a claim with nothing over it.
+  "justify what I'm saying". Once the take is placed and cut, run
+  `tandem claims`: it lists every line that names something or makes a
+  claim. Fill in each in `<name>.claims.json` (a `shot` and `link`, or
+  `skip` with why), then pin `tandem claims --markdown claims.md` for
+  Mike before building the B-roll. `tandem check` notes what's still bare.
 - **Gags he describes on screen keep his face in shot** unless the note
   says full screen: the caveats "whiz down on the side of the screen with
   me still on the screen when I say asterisk", an overlay, not full-frame
@@ -659,6 +721,13 @@ From his review comments on the Daytona and Build Your Own Convex videos
   your cue list: one built from cues missed 10 on Build Your Own Convex,
   and Mike pushed them by hand. `tandem check` lists the ones with no
   transition as page change notes.
+  Not in an off-the-cuff app demo: on the coordinators video (19 Nov 2026,
+  him clicking between Threadbear, Capy and Codex) he had all 19 pushes
+  taken out, "I don't think we need them in this video". There, app and
+  thread switches cut straight; answer the page change notes with that.
+  If you take pushes out after freezing either side of a flip, put the
+  screen back in step with the camera clip under it, and redo any
+  `holdFrame` the unfreeze undid.
 - **Picture-in-picture only when he's driving the screen.** When Mike clicks
   and moves the mouse on a recording, he sits in the corner (pipRight) over
   it. When he's reading a script to camera, B-roll goes full screen on the
@@ -728,6 +797,21 @@ From his review comments on the Daytona and Build Your Own Convex videos
   project's target and says what it used.
 
 ### A hot-takes cold open
+
+The same montage is also the X clip for an interview. On Wayne's Macaly interview (16 Nov 2026), Mike turned down
+three single 50 s moments as X clips: "it needs a bit more background music and a bit faster cuts to keep it a bit
+more exciting and shorter... more like a montage that we did with the other one, like the James interview". So
+make six or seven 3 to 6 s bites of the spiciest lines, with the highlighter text and the swoosh pushes. When the
+source is a finished edit with one angle per stretch, cut in tighter on the speaker on every punchline (crops of
+the 4K frame) so each hit gets a cut. `macaly-interview/.work/scripts/montage.py` builds one with ffmpeg and the
+James cold open's text component, music bed and sound effects, with no Tandem project needed.
+
+Music for these montages: Liz found the dark electronic trailer bed (the James pick) "a bit too dramatic", and
+Mike still wanted it dramatic, "but not overly". Beds that are too calm (lo-fi downtempo, indie house, boom-bap)
+didn't work, and nor did a strings and hip-hop beat, a keynote synth pulse, lo-fi trap or the James bed 4 dB quieter.
+He picked a documentary tension bed, the Diary of a CEO trailer sound: a ticking pulse, a sparse felt-piano motif,
+sub bass and soft strings building gently, with no trailer hits, braams or drops (`elevenlabs:music_bmygjdjp`,
+16 Nov 2026). Start there for the next montage, with its first soft hit on the first punchline.
 
 The best moments cut together before the first line, to draw people in.
 Plain bites butted together "isn't very exciting": "The whole point of the
@@ -1074,6 +1158,20 @@ and the upload batch.
   at the same time, which is confusing". Put it in the top window as a card
   (scale 0.42 at y 0.21875 over a blurred copy cropped to the window), with
   the camera in the bottom half, so it reads as the old video playing.
+- **When his camera is soft, he goes small and the screen goes big**
+  (coordinators video, 19 Nov 2026: "having me smaller on the screen and
+  showing more of the screen would be better given that I'm blurry"). The
+  default top-and-bottom split put his blurry face across half the phone.
+  What he got instead: the screen cropped to the part that matters and
+  scaled to fill the top two thirds, captions under it, and him on his
+  cutout at scale 0.85 at (0.6, 0.84), bottom right.
+- **Pick the moments that carry the video, not the first quotable line.**
+  He turned down a Short built round one aside ("pick out some more
+  interesting parts"). Fable and Astra both ranked the strongest rant
+  first, and the Short he took ran rant, then the demo that proves it,
+  then his closing question. For a talky, off-the-cuff video, ask other
+  labs to rank the moments when he asks for that, and lead with the
+  strongest.
 - **A question he asks the viewer types out on screen as he says it**, in
   his exact words with the typing sound, below his face, sliding off as he
   moves on (1.48: "pop up the question on the screen here as I say it").
@@ -1085,6 +1183,8 @@ and the upload batch.
   Turning `normalizeTo` on now resets that placed gain to 0 and says so, but
   `tandem loudness --tracks Music` over a stretch should still read about
   the level you set.
+- **Library segments carry their own scale keyframes.** In a Short made with `tandem short --copy`, the `Comment below` sting came out filling the phone frame, and patching its `video.transform.scale` changed nothing, because the segment animates `video.transform.scale` with keyframes (1.31 hold, 1.44 bump, 0.04 pop out). Scale the keyframes instead (about 0.5, 0.5, 0.55, 0.02 sits it under the captions at y 0.66) (Convex 1.50, 16 Nov 2026).
+- **Music placed with `assets use` plays at full level until its file is measured.** `normalizeTo: -45` does nothing while `tandem loudness <media>` says "not measured yet", and the bed sits as loud as his voice. Run `tandem wait jobs --media <id>` for each bed before measuring the Music track (Convex 1.50).
 - **Plain white captions with no highlight** (Databased, 2026-11-10: "big
   plain white one-word captions" like its old editor): `tandem captions
   --style plain --max-words 1 --size 150 --apply`, with `--color`, `--font`
@@ -1528,6 +1628,11 @@ comments, changed these rules for a conversation like this:
   0.25 s + 1.5 s after they're written; stay on his shot longer rather
   than cutting the title short. Every question gets one, including a
   follow-up asked mid-answer.
+- **On-screen text over his face ends before the B-roll starts** ("This
+  text should not overlap the b-roll here"), its fade done by the cut.
+  Dark handwriting straight on the wall was too hard to read; his pick for
+  a question beside his face (Examples Page) was white handwriting on a
+  dark translucent box: "maybe white or white with black background".
 - **Name tags over each person,** a two-line title above their own head,
   his too ("Mad Scientist at Convex"), not one centred card. No avatar
   circle when the person is on screen ("we can see our face"), and no
@@ -1689,3 +1794,10 @@ file.
   exports, with a warning, for a copy to watch; `--unreviewed` makes a
   check export of a final preset (a 4K look at a zoom, say), never one to
   publish or send.
+- **At sign-off, before the final export,** run `tandem rounds --log
+  ~/dev/convex/convex-videos/review-log.jsonl`. It says how the review went
+  round by round (Mike's comments and what they were about, the trims he
+  made himself) and adds the video's line to the channel's log. Compare it
+  with the last few lines of the log, and put what the comments keep
+  asking for into this skill (or the skill it belongs in), so the next
+  video's first hand-back doesn't need them.

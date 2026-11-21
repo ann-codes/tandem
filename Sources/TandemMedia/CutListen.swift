@@ -241,7 +241,11 @@ public enum CutListen {
                     guard r <= right.count, middle.count + count <= 3 else { continue }
                     let run = Array(left.suffix(l)) + middle + Array(right.prefix(r))
                     let joined = run.map { canonical(heard[$0].text) }.joined()
-                    guard joined == target || similar(joined, target) else { continue }
+                    // A word with a number in it spelled out ("little3D" as
+                    // "littlethreed") has to be heard all through: "little
+                    // three" is near it by an ending, but it's the D cut off.
+                    let exact = said[s].text.contains(where: \.isNumber)
+                    guard joined == target || !exact && similar(joined, target) else { continue }
                     run.forEach { absorbed.insert($0) }
                     return run.map { heard[$0].text }.joined(separator: " ")
                 }
@@ -270,6 +274,26 @@ public enum CutListen {
                 let between = word.middle <= join ? other < word.middle : other > word.middle
                 return between && theirs < mine
             }
+        }
+        // A restart cut where the voice runs straight on: "is. So I'm just
+        // gonna, uh. | so I'm just gonna", cut at the onset of the first
+        // "So". The transcript's times put most of that "So" before the
+        // edge, so it reads as the last kept word, but the cut starts with
+        // it: the words cut past the edge begin with the same two words the
+        // other side starts with, which is heard. Its not being heard is the
+        // cut, as meant. On the Coordinators video (19 Nov 2026) it stood as
+        // a cut-off however the join was cut, and the agent had to hand back
+        // unchecked. A kept word cut short ("I said stop. | Stop the
+        // recording", with "uh" cut) doesn't repeat the cut's two words.
+        // Only a short word: a longer one cut part way ("extract | extract
+        // the data") leaves a piece the engine can miss, so its not being
+        // heard still says cut off.
+        func restartCut(_ s: Int) -> Bool {
+            guard isFunctionWord(said[s].text) || canonical(said[s].text).count <= 2, let after = afterIndex, after + 1 < said.count, cutPast.count >= 2,
+                  let index = stepOfSaid[after], case .match = steps[index] else { return false }
+            let word = canonical(said[s].text)
+            return !word.isEmpty && canonical(cutPast[0]) == word && canonical(said[after].text) == word
+                && canonical(cutPast[1]) == canonical(said[after + 1].text) && !canonical(cutPast[1]).isEmpty
         }
         var heardTwice: [Int: String] = [:]
         for s in [beforeIndex, afterIndex].compactMap({ $0 }) {
@@ -336,6 +360,7 @@ public enum CutListen {
                 let atJoin = s == beforeIndex || s == afterIndex
                 // A word between two joins is the nearer one's to report.
                 if atJoin, !owns(s) { continue }
+                if s == beforeIndex, restartCut(s) { continue }
                 let short = isFunctionWord(text) || canonical(text).count <= 2
                 let why = short ? "a short or filler word the engine often leaves out"
                     : atJoin ? "nothing heard for it" : "nothing heard for it, away from the join, where the cut can't reach"
@@ -423,7 +448,9 @@ public enum CutListen {
                 let how: Difference? = said[i].lowercased().filter(\.isLetter) == heard[j].lowercased().filter(\.isLetter) ? nil : .loose("the same word written differently")
                 return (far, how)
             }
-            if similar(a[i], b[j]) { return (0.5 + far, .near) }
+            // A word with a number in it is heard whole or not: "little3"
+            // for "little3D" is the D cut off, not an ending.
+            if !said[i].contains(where: \.isNumber), similar(a[i], b[j]) { return (0.5 + far, .near) }
             return (1 + far, .different)
         }
         var table = [[Double]](repeating: [Double](repeating: .infinity, count: m + 1), count: n + 1)
@@ -479,11 +506,28 @@ public enum CutListen {
     ]
 
     /// Lower case letters and digits only, numbers as words, and spoken
-    /// forms spelled out ("wanna" is "wantto").
+    /// forms spelled out ("wanna" is "wantto"). A number inside a word is
+    /// spelled out too: on the Examples Page video (18 Nov 2026) the take's
+    /// transcript had "little3D" and Bark heard "little three D", every
+    /// sound of it, so "little3D" is "littlethreed".
     static func canonical(_ text: String) -> String {
         let plain = text.lowercased().filter { $0.isLetter || $0.isNumber }
         if let number = Int(plain), number >= 0 { return numberWords(number) }
-        return spoken[plain] ?? plain
+        if let spelled = spoken[plain] { return spelled }
+        guard plain.contains(where: \.isNumber), plain.contains(where: \.isLetter) else { return plain }
+        var out = "", digits = ""
+        func flush() {
+            if let number = Int(digits) { out += numberWords(number) } else { out += digits }
+            digits = ""
+        }
+        for character in plain {
+            if character.isNumber { digits.append(character) } else {
+                flush()
+                out.append(character)
+            }
+        }
+        flush()
+        return out
     }
 
     /// "15" as "fifteen", "2026" as "twothousandtwentysix": how the

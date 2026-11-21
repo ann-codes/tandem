@@ -36,6 +36,26 @@ final class FrameScannerTests: XCTestCase {
         XCTAssertEqual(green.clipIDs, ["clip_p"])
     }
 
+    /// A frame held over a flash (`holdFrame`, kept on the clip by media
+    /// time) renders as the frame before it, in a clip that isn't cut.
+    func testAHeldFrameCoversTheFlash() async throws {
+        let media = try TestMedia()
+        try await media.movie("flash.mov", seconds: 2, draw: { frame, c in
+            TestMedia.fill(c, 0.4, 0.4, 0.4)
+            if frame == 15 { TestMedia.fill(c, 1, 1, 1) }
+        })
+        let clip = Clip(id: "clip_p", content: .media(mediaID: "med_p"), start: .zero, duration: t(2))
+        var project = smallProject(video: [Track(kind: .video, name: "V1", clips: [clip])], media: [media.item("med_p", "flash.mov", seconds: 2)])
+        var context = EditContext(seed: 1)
+        let frame = project.settings.frameRate.frameDuration
+        try Editing.apply(.holdFrame(clipID: "clip_p", range: TimeRange(start: frame.scaled(by: 15), duration: frame)), to: &project, context: &context)
+        XCTAssertEqual(project.videoTracks[0].clips.count, 1)
+        let frames = try await FrameScanner.scan(RenderContext(project: project, folder: media.projectFolder), ranges: [TimeRange(start: .zero, end: t(2))], width: 128)
+        XCTAssertEqual(frames.count, 60)
+        XCTAssertLessThan(frames[15].difference(from: frames[14]), 0.01, "frame 15 shows frame 14, not the white flash")
+        XCTAssertTrue(QualityCheck.frameProblems(frames, in: project).isEmpty, "\(QualityCheck.frameProblems(frames, in: project).map(\.message))")
+    }
+
     /// A reader that starts partway through a held frame could stall forever
     /// (the Convex 1.49 release edit: `tandem check` hung silently on 1:00
     /// to 1:10, where a push went between two clips holding their edges).
@@ -43,16 +63,21 @@ final class FrameScannerTests: XCTestCase {
     func testScanningFromInsideAFreezeFrameDoesntStall() async throws {
         let media = try TestMedia()
         try await media.movie("grey.mov", seconds: 3, draw: { _, c in TestMedia.fill(c, 0.5, 0.5, 0.5) })
-        let clip = Clip(id: "clip_f", content: .media(mediaID: "med_g"), start: .zero, duration: t(1.7), sourceStart: t(1), freezeFrame: true)
-        let project = smallProject(video: [Track(kind: .video, name: "V1", clips: [clip])], media: [media.item("med_g", "grey.mov", seconds: 3)])
-        let context = RenderContext(project: project, folder: media.projectFolder)
-        for start in [1.335, 1.343, 1.5, 0.5, 0.75, 1.2] {
-            let range = TimeRange(start: t(start), end: t(start + 0.1))
-            let frames = try await withDeadline(seconds: 30, "reading from \(start)") {
-                try await FrameScanner.scan(context, ranges: [range], width: 64)
+        // A freeze, and a clip that runs out of file and holds its last frame.
+        for clip in [
+            Clip(id: "clip_f", content: .media(mediaID: "med_g"), start: .zero, duration: t(1.7), sourceStart: t(1), freezeFrame: true),
+            Clip(id: "clip_r", content: .media(mediaID: "med_g"), start: .zero, duration: t(1.7), sourceStart: t(2.9))
+        ] {
+            let project = smallProject(video: [Track(kind: .video, name: "V1", clips: [clip])], media: [media.item("med_g", "grey.mov", seconds: 3)])
+            let context = RenderContext(project: project, folder: media.projectFolder)
+            for start in [1.335, 1.343, 1.5, 0.5, 0.75, 1.2] {
+                let range = TimeRange(start: t(start), end: t(start + 0.1))
+                let frames = try await withDeadline(seconds: 30, "reading from \(start)") {
+                    try await FrameScanner.scan(context, ranges: [range], width: 64)
+                }
+                XCTAssertFalse(frames.isEmpty, "from \(start)")
+                XCTAssertTrue(frames.allSatisfy { $0.time >= range.start }, "the frames read to get there are dropped")
             }
-            XCTAssertFalse(frames.isEmpty, "from \(start)")
-            XCTAssertTrue(frames.allSatisfy { $0.time >= range.start }, "the frames read to get there are dropped")
         }
     }
 
@@ -61,8 +86,10 @@ final class FrameScannerTests: XCTestCase {
         try await media.movie("grey.mov", seconds: 3, draw: { _, c in TestMedia.fill(c, 0.5, 0.5, 0.5) })
         let clips = [
             Clip(id: "clip_a", content: .media(mediaID: "med_g"), start: .zero, duration: t(1)),
-            Clip(id: "clip_f", content: .media(mediaID: "med_g"), start: t(1), duration: t(2), sourceStart: t(1), freezeFrame: true),
-            Clip(id: "clip_s", content: .media(mediaID: "med_g"), start: t(3), duration: t(2), sourceStart: t(1), speed: 0.5)
+            // Runs out of file at 1.5 s and holds its last frame.
+            Clip(id: "clip_r", content: .media(mediaID: "med_g"), start: t(1), duration: t(2), sourceStart: t(2.5)),
+            Clip(id: "clip_s", content: .media(mediaID: "med_g"), start: t(3), duration: t(2), sourceStart: t(1), speed: 0.5),
+            Clip(id: "clip_f", content: .media(mediaID: "med_g"), start: t(5), duration: t(2), sourceStart: t(1), freezeFrame: true)
         ]
         let project = smallProject(video: [Track(kind: .video, name: "V1", clips: clips)], media: [media.item("med_g", "grey.mov", seconds: 3)])
         let built = try await CompositionAssembler.build(RenderContext(project: project, folder: media.projectFolder))
@@ -70,18 +97,19 @@ final class FrameScannerTests: XCTestCase {
             ExportPipeline.readStart(t(seconds), composition: built.composition, instructions: built.videoComposition.instructions).seconds
         }
         XCTAssertEqual(start(0.5), 0.5, accuracy: 0.001, "playing normally, it starts where it's asked")
-        XCTAssertEqual(start(2.5), 1, accuracy: 0.001, "partway through the frozen frame")
-        XCTAssertEqual(start(1), 1, accuracy: 0.001, "already on its start")
+        XCTAssertEqual(start(2.5), 1.5, accuracy: 0.001, "partway through the held last frame")
+        XCTAssertEqual(start(1.5), 1.5, accuracy: 0.001, "already on its start")
         XCTAssertEqual(start(4), 4, accuracy: 0.001, "a slow clip isn't a held frame")
+        XCTAssertEqual(start(6), 6, accuracy: 0.001, "a freeze isn't on the tracks, the compositor draws it")
     }
 
     /// When AVFoundation stalls anyway, the scan says so instead of waiting
     /// forever. Starting inside a held frame, which the scan no longer does,
-    /// is a real stall to try it on.
+    /// is a real stall to try it on: here a clip that runs out of file.
     func testAStalledReaderFailsWithAClearMessage() async throws {
         let media = try TestMedia()
         try await media.movie("grey.mov", seconds: 3, draw: { _, c in TestMedia.fill(c, 0.5, 0.5, 0.5) })
-        let clip = Clip(id: "clip_f", content: .media(mediaID: "med_g"), start: .zero, duration: t(1.7), sourceStart: t(1), freezeFrame: true)
+        let clip = Clip(id: "clip_r", content: .media(mediaID: "med_g"), start: .zero, duration: t(1.7), sourceStart: t(2.9))
         let project = smallProject(video: [Track(kind: .video, name: "V1", clips: [clip])], media: [media.item("med_g", "grey.mov", seconds: 3)])
         var context = RenderContext(project: project, folder: media.projectFolder)
         context.sizeOverride = CGSize(width: 64, height: 36)
@@ -119,25 +147,6 @@ final class FrameScannerTests: XCTestCase {
         XCTAssertEqual(fired.count, 1, "once")
     }
 
-    /// `body`'s result, or a failure once `seconds` have gone: a stalled
-    /// reader blocks its thread for good, so a task group would wait on it.
-    private func withDeadline<T: Sendable>(seconds: Double, _ what: String, _ body: @escaping @Sendable () async throws -> T) async throws -> T {
-        let once = LockedCount()
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
-            Task.detached {
-                do {
-                    let value = try await body()
-                    if once.add() == 1 { continuation.resume(returning: value) }
-                } catch {
-                    if once.add() == 1 { continuation.resume(throwing: error) }
-                }
-            }
-            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) {
-                if once.add() == 1 { continuation.resume(throwing: DeadlineError(what: what)) }
-            }
-        }
-    }
-
     func testOnlyTheRangesAskedForAreRead() async throws {
         let media = try TestMedia()
         try await media.movie("grey.mov", seconds: 3, draw: { _, c in TestMedia.fill(c, 0.5, 0.5, 0.5) })
@@ -167,6 +176,64 @@ final class FrameScannerTests: XCTestCase {
         XCTAssertEqual(QualityCheck.frameProblems(frames, in: project).map(\.start.seconds), [12])
     }
 
+    /// AVFoundation's HDR to SDR conversion settles over a reader's first
+    /// frames, so a piece read from its own start began a tenth brighter
+    /// than the frame before it: the workbench short (an iPhone's HLG take,
+    /// 19 Nov 2026) showed a flicker at every 10 s mark the scan's pieces
+    /// are cut on, which moved with the grid when the timeline moved.
+    func testHDRPiecesReadTheSameAsOneStretch() async throws {
+        let media = try TestMedia()
+        // A gradient with a bright window, moving a little each frame, in
+        // 10-bit HLG.
+        try await media.movie("hlg.mov", seconds: 12, hlg: true, draw: { frame, c in
+            for x in stride(from: 0, to: 320, by: 8) {
+                let v = 0.15 + 0.5 * Double(x) / 320
+                c.setFillColor(CGColor(srgbRed: v, green: v * 0.9, blue: v * 0.8, alpha: 1))
+                c.fill(CGRect(x: x, y: 0, width: 8, height: 180))
+            }
+            c.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+            c.fill(CGRect(x: 40 + frame % 40, y: 30, width: 90, height: 60))
+        })
+        let clip = Clip(id: "clip_h", content: .media(mediaID: "med_h"), start: .zero, duration: t(12))
+        let project = smallProject(video: [Track(kind: .video, name: "V1", clips: [clip])], media: [media.item("med_h", "hlg.mov", seconds: 12)])
+        let context = RenderContext(project: project, folder: media.projectFolder)
+        let range = TimeRange(start: t(9), end: t(11))
+        let frames = try await FrameScanner.scan(context, ranges: [range], width: 128)
+        XCTAssertEqual(frames.count, 60)
+
+        // The same stretch read straight through from the start, as an
+        // export reads it.
+        var small = context
+        small.sizeOverride = CGSize(width: 128, height: 72)
+        let built = try await CompositionAssembler.build(await ConvertedMedia.prepare(small).0)
+        let hdr = await FrameScanner.hasHDR(built.composition)
+        XCTAssertTrue(hdr)
+        let tracks = try await built.composition.loadTracks(withMediaType: .video)
+        let straight = try await FrameScanner.read(built, tracks: tracks, range: range, scanlines: false, from: .zero)
+        XCTAssertEqual(straight.map(\.time), frames.map(\.time))
+        for (scanned, read) in zip(frames, straight) {
+            XCTAssertLessThan(scanned.difference(from: read), 0.01, "\(scanned.time) differs from reading straight through")
+        }
+        XCTAssertTrue(QualityCheck.frameProblems(frames, in: project).isEmpty, "\(QualityCheck.frameProblems(frames, in: project).map(\.message))")
+
+    }
+
+    /// A proxy of an HDR take is 8-bit HEVC still tagged HLG, which
+    /// AVFoundation converts the same way, so it counts as HDR too (and
+    /// `containsHDRVideo`, which wants 10 bits, would miss it).
+    func testAnEightBitHLGProxyIsHDR() async throws {
+        let media = try TestMedia()
+        try await media.movie("proxy.mov", seconds: 1, hlg: true, tenBit: false, draw: { _, c in TestMedia.fill(c, 0.5, 0.5, 0.5) })
+        try await media.movie("sdr.mov", seconds: 1, codec: .hevc, draw: { _, c in TestMedia.fill(c, 0.5, 0.5, 0.5) })
+        for (name, hdr) in [("proxy.mov", true), ("sdr.mov", false)] {
+            let clip = Clip(id: "clip_p", content: .media(mediaID: "med_p"), start: .zero, duration: t(1))
+            let project = smallProject(video: [Track(kind: .video, name: "V1", clips: [clip])], media: [media.item("med_p", name, seconds: 1)])
+            let built = try await CompositionAssembler.build(await ConvertedMedia.prepare(RenderContext(project: project, folder: media.projectFolder)).0)
+            let found = await FrameScanner.hasHDR(built.composition)
+            XCTAssertEqual(found, hdr, name)
+        }
+    }
+
     func testPiecesComeBackInOrderWhateverFinishesFirst() async throws {
         let pieces = (0..<7).map { TimeRange(start: t(Double($0) * 10), end: t(Double($0 + 1) * 10)) }
         let joined = try await FrameScanner.inParallel(pieces, limit: 3) { piece -> [Int] in
@@ -176,18 +243,6 @@ final class FrameScannerTests: XCTestCase {
         }
         XCTAssertEqual(joined, Array(0..<14))
     }
-}
-
-private struct DeadlineError: Error, CustomStringConvertible {
-    var what: String
-    var description: String { "\(what) never finished" }
-}
-
-private final class LockedCount: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value = 0
-    var count: Int { lock.withLock { value } }
-    @discardableResult func add() -> Int { lock.withLock { value += 1; return value } }
 }
 
 /// Checks scan at utility priority so they give way to Mike's own work;
