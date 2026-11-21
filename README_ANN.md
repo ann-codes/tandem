@@ -19,6 +19,8 @@ git remote -v
 
 ## 2. Syncing Fork with Upstream
 
+**Last synced:** 21 Nov 2025, at merge commit `a536e85` (upstream `829910e`, "iPhone HDR footage looks the same paused, playing and exported"). Upstream's build scripts and `Package.swift` were unchanged in that batch, so the workarounds below needed no revision.
+
 To bring this fork up to date with the latest changes from Mike Cann's upstream repository:
 
 ### Step 1: Fetch upstream commits
