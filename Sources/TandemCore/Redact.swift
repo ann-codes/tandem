@@ -7,6 +7,9 @@ public enum RedactStyle: String, Codable, CaseIterable, Sendable {
     /// The effect parameter `size` sets: the block size or the radius.
     var parameter: String { self == .pixelate ? "scale" : "radius" }
 
+    /// One-pixel mosaic cells and a zero-radius blur leave pixels sharp.
+    var minimumSize: Double { self == .pixelate ? 1 : 0 }
+
     /// The effect's own default, from the registry.
     var defaultSize: Double {
         let definition = EffectRegistry.builtIn.first { $0.type == rawValue }
@@ -16,13 +19,17 @@ public enum RedactStyle: String, Codable, CaseIterable, Sendable {
 }
 
 extension Clip {
+    public var isRedaction: Bool {
+        video?.redaction != nil || video?.redactionSources != nil || video?.redactionEffectID != nil || video?.redactionOriginID != nil || video?.redactionVisibility != nil
+    }
+
     /// A copy of a picture that hides it, or part of it, behind a pixelate
     /// or blur: a redaction over a QR code or an email, or the blurred fill
     /// behind a shot that doesn't cover the frame. It's the same file at
     /// the same moment as the clip it sits on, on purpose, so it isn't a
     /// second shot (`sameShotTwice`) or another angle (`showAngle`).
     public var isObscured: Bool {
-        video?.effects.contains { $0.enabled && RedactStyle(rawValue: $0.type) != nil } == true
+        RedactionSafety.effect(on: self) != nil
     }
 }
 
@@ -36,25 +43,26 @@ extension Track {
     /// `redact`, so a solid, a title or anything else put on a privacy
     /// track by hand is never taken for one.
     public func isSwitchedOffRedaction(_ clip: Clip) -> Bool {
-        guard isPrivacy, case .media = clip.content, !clip.isObscured else { return false }
-        return clip.name?.hasPrefix("Privacy") == true
+        // Cheap clip checks before `isPrivacy`, which scans the track: the
+        // renderer asks this for every clip.
+        guard case .media = clip.content, clip.isRedaction, !clip.isObscured else { return false }
+        return isPrivacy
     }
 }
 
 extension Editing {
-    /// The tracks `redact` puts its copies on are named "Privacy (Screen)"
-    /// after the track they hide part of; this is how they're recognised,
-    /// hand-made ones included.
+    /// The prefix used when naming tracks and importing legacy copies.
     static let privacyTrackPrefix = "privacy ("
 
     public static func isPrivacyTrack(_ track: Track) -> Bool {
-        track.name.lowercased().hasPrefix(privacyTrackPrefix)
+        track.clips.contains(where: \.isRedaction)
     }
 
     /// `redact`: hides `rect` (fractions of the source frame, from the top
     /// left) of every clip of `mediaID` (or every clip on `trackID`) over
     /// `range`, behind a pixelate or blur. Each clip there gets a copy of
-    /// itself on a `cut` track right above its own ("Privacy (Screen)"):
+    /// itself on a track right above its own ("Privacy (Screen)"), with
+    /// the source's ripple mode:
     /// the same file, start, length, source time, speed and placement
     /// (keyframes and format layouts too, so a phone shown as a PiP is
     /// hidden where it's shown), cropped to the region, with the effect on.
@@ -62,7 +70,8 @@ extension Editing {
     /// is linked one clip a track with the piece it hides, and ripple cuts,
     /// trims, slips and moves keep it on it.
     ///
-    /// The edges are where asked (to the frame): one less than a frame from
+    /// The edges are where asked, to the frame (of the file, inside a clip,
+    /// so no frame's split between a hidden piece and a sharp one): one less than a frame from
     /// a clip's edge goes to it, so no sliver of take is cut off, and a
     /// clip the range overlaps by less than a frame gets no copy. Past
     /// that, the take's cut where asked, and the through-edit plays
@@ -79,7 +88,9 @@ extension Editing {
               rect.x + rect.width <= 1 + slack, rect.y + rect.height <= 1 + slack else {
             throw EditError.invalid("rect is fractions of the source frame from the top left: x and y from 0, width and height above 0, inside 1")
         }
-        if let size, !(size > 0) { throw EditError.invalid("size must be above 0") }
+        if let size, !(size > style.minimumSize) {
+            throw EditError.invalid("A \(style.rawValue) redaction needs size above \(style.minimumSize) to hide pixels")
+        }
         if let mediaID, p.media(mediaID) == nil { throw EditError.notFound("media \(mediaID)") }
         let rate = p.settings.frameRate
         let range = TimeRange(start: requested.start.roundedToFrame(rate), end: requested.end.roundedToFrame(rate))
@@ -90,6 +101,7 @@ extension Editing {
         if let trackID {
             let location = try requireTrack(p, trackID)
             guard location.kind == .video else { throw EditError.invalid("\"\(p[location].name)\" is a sound track; redact hides part of a picture") }
+            guard !p[location].isPrivacy else { throw EditError.invalid("Redact the source picture, not its privacy copy.") }
             sources = [location]
         } else {
             // Not the privacy tracks themselves: their copies are the
@@ -98,13 +110,13 @@ extension Editing {
         }
 
         // What to hide, by ID, since the tracks move as privacy tracks are added.
-        struct Target { var trackID: String; var clipID: String; var span: TimeRange }
+        struct Target { var trackID: String; var clipID: String; var clip: TimeRange; var span: TimeRange }
         var targets: [Target] = []
         for location in sources {
             let track = p[location]
-            for clip in track.clips where clip.range.overlaps(range) && !clip.isObscured {
+            for clip in track.clips where clip.range.overlaps(range) {
                 guard let id = clip.mediaID, mediaID == nil || id == mediaID,
-                      let item = p.media(id), item.hasVideo, var span = clip.range.intersection(range) else { continue }
+                      let item = p.media(id), item.hasVideo || item.kind == .image, var span = clip.range.intersection(range) else { continue }
                 // Never past the time asked for, except to a clip edge
                 // less than a frame away: that's rounding (a take tightened
                 // off the frame grid), and cutting there would leave a
@@ -120,6 +132,13 @@ extension Editing {
                     context.warn("Left \(clip.name ?? clip.id) on \"\(track.name)\" alone: the range only takes \(String(format: "%.3f", span.duration.seconds)) s of it, under a frame. Widen the range if that clip shows what needs hiding.")
                     continue
                 }
+                // An edge inside the clip goes out to where one of the
+                // file's own frames starts. The copy owns every frame of the
+                // file it touches, so a cut partway through one (a clip placed
+                // off the frame grid, or a file at another rate) left that
+                // frame protected but sharp on the piece beside it, and the
+                // edit was refused. Sammy Cam's B-roll was cut 9 ms into one.
+                span = try fileFrameSpan(span, asked: requested, of: clip, media: item, rate: rate)
                 // A format's own crop replaces the main one there, so the
                 // region's only already hidden when every layout crops it out.
                 let mainCrop = widestCrop(of: clip, override: nil)
@@ -128,7 +147,7 @@ extension Editing {
                     context.warn("Left \(clip.name ?? clip.id) on \"\(track.name)\" alone: its crop already hides that region.")
                     continue
                 }
-                targets.append(Target(trackID: track.id, clipID: clip.id, span: span))
+                targets.append(Target(trackID: track.id, clipID: clip.id, clip: clip.range, span: span))
             }
         }
         guard !targets.isEmpty else {
@@ -146,7 +165,24 @@ extension Editing {
             var copies: [Clip] = []
             for target in targets where target.trackID == sourceID {
                 guard let at = p.location(ofTrack: sourceID) else { throw EditError.notFound("track \(sourceID)") }
-                var piece = try SyncedPlacement.isolate(&p, clipID: target.clipID, to: target.span, on: at, &context)
+                // A clip linked to one cut earlier in this loop has been cut
+                // at that one's edges, so it's the piece there that's cut
+                // again. Each clip's edges are on its own file's frames, so
+                // when the two sit at different points in their frames, no
+                // cut suits both: the piece has an edge that's neither the
+                // clip's nor the range's.
+                guard let here = p[at].clip(at: target.span.start) else { throw EditError.notFound("clip \(target.clipID)") }
+                // A piece whose head was cut maps its time to the file's a
+                // sample differently on a slowed or sped up clip, so its end
+                // is worked out again from the piece.
+                var span = target.span
+                if here.id != target.clipID, let item = here.mediaID.flatMap(p.media) {
+                    span = try fileFrameSpan(span, asked: requested, of: here, media: item, rate: rate, snapToEdges: false)
+                }
+                if here.end < span.end || ![span.start, target.clip.start].contains(here.start) || ![span.end, target.clip.end].contains(here.end) {
+                    throw EditError.invalid("\(here.name ?? here.id) on \"\(p[at].name)\" is linked to another clip being hidden whose frames fall at different times, so no cut splits both on a frame. Unlink them first.")
+                }
+                var piece = try SyncedPlacement.isolate(&p, clipID: here.id, to: span, on: at, &context)
                 if piece.linkGroup == nil, let index = p[at].index(ofClip: piece.id) {
                     piece.linkGroup = context.makeID("lnk")
                     p[at].clips[index].linkGroup = piece.linkGroup
@@ -160,6 +196,80 @@ extension Editing {
                 context.createdIDs.append(copy.id)
             }
         }
+    }
+
+    /// `span` with each edge inside `clip` moved out to the start of the
+    /// file frame the edge `asked` for falls in (the one after, for an end
+    /// edge), so no frame is split between the hidden piece and a sharp one
+    /// beside it and every frame the range shows is hidden, with the
+    /// pieces' source times worked out as `blade` will make them. A held
+    /// frame, a still or a variable rate file keeps `span`. An edge that
+    /// comes within a frame of the clip's goes to it, as in `redact`, unless
+    /// `snapToEdges` is off: a piece's edge cut for another clip isn't one
+    /// to move to, as it may split one of this clip's frames.
+    ///
+    /// The pieces either side of a cut have to meet exactly at the frame's
+    /// start: one that ends inside a frame owns it once it's hidden, and
+    /// one that starts inside the frame before shows that for a whole
+    /// frame. Times are kept to the 48 kHz sample, where a 29.97 fps frame
+    /// starts only every fifth frame, so an edge goes on out to the first
+    /// frame start a sample lands on.
+    static func fileFrameSpan(_ span: TimeRange, asked: TimeRange, of clip: Clip, media: MediaItem, rate: FrameRate, snapToEdges: Bool = true) throws -> TimeRange {
+        guard !clip.freezeFrame, media.kind != .image, media.variableFrameRate != true else { return span }
+        let fileRate = media.frameRate ?? rate
+        let delay = media.pictureDelay ?? .zero
+        let sample = Time(flicks: Time.flicksPerSample48k)
+        let speed = max(clip.speed, 0.0001)
+        let near = snapToEdges ? rate.frameDuration : sample
+        func timeline(_ source: Time) -> Time { clip.start + (source - clip.sourceStart).scaled(by: 1 / speed) }
+        func frameStart(_ index: Int64) -> Time { Time.frames(index, at: fileRate) - delay }
+        // At some speeds of a 29.97 fps file no sample lands on a frame
+        // start for a while. A cut anywhere else would be refused as
+        // exposing the frame it splits, so say why here.
+        func unreachable(_ edge: String, _ time: Time) -> EditError {
+            EditError.invalid("Couldn't \(edge) the redaction of \(clip.name ?? clip.id) on a frame of its file near \(time): at its speed of \(clip.speed)x, no frame there starts on an audio sample, where times are kept. Move that edge a little, or to the clip's edge.")
+        }
+
+        var start = span.start
+        if start > clip.start {
+            let first = (clip.sourceTime(atTimelineTime: asked.start) + delay).frameIndex(at: fileRate)
+            var found: Time?
+            search: for index in stride(from: first, to: first - 8, by: -1) {
+                let boundary = frameStart(index)
+                let guess = timeline(boundary)
+                if guess - clip.start < near { found = clip.start; break }
+                for time in [guess - sample, guess, guess + sample] where time > clip.start && time < span.end && time <= asked.start
+                    && clip.sourceTime(atTimelineTime: time) == boundary {
+                    found = time
+                    break search
+                }
+            }
+            guard let found else { throw unreachable("start", asked.start) }
+            start = found
+        }
+        var end = span.end
+        if end < clip.end {
+            let first = (clip.sourceTime(atTimelineTime: asked.end) + delay - Time(flicks: 1)).frameIndex(at: fileRate) + 1
+            // The piece's source end as `blade` makes it: the end cut first,
+            // then the head moved to `start`, its source from there. The
+            // piece after starts at the original's source there.
+            let head = start > clip.start ? clip.sourceTime(atTimelineTime: start) : clip.sourceStart
+            func sourceEnd(_ time: Time) -> Time { head + (time - start).scaled(by: clip.speed) }
+            var found: Time?
+            search: for index in first..<(first + 8) {
+                let boundary = frameStart(index)
+                let guess = timeline(boundary)
+                if clip.end - guess < near { found = clip.end; break }
+                for time in [guess - sample, guess, guess + sample] where time > start && time >= asked.end
+                    && sourceEnd(time) <= boundary && clip.sourceTime(atTimelineTime: time) >= boundary {
+                    found = time
+                    break search
+                }
+            }
+            guard let found else { throw unreachable("end", asked.end) }
+            end = found
+        }
+        return end > start ? TimeRange(start: start, end: end) : span
     }
 
     /// The piece, cropped down to `rect` and hidden: it keeps its file,
@@ -187,6 +297,8 @@ extension Editing {
             effect.id = context.makeID("fx")
             return effect
         } + [Effect(id: context.makeID("fx"), type: style.rawValue, params: [style.parameter: .number(size)])]
+        video.redactionEffectID = video.effects.last?.id
+        video.redactionOriginID = copy.id
         // A format's own crop replaces the main one there, so the region
         // has to be cut from it too, or the short would show the copy uncropped.
         video.formatOverrides = video.formatOverrides.mapValues { override in
@@ -232,9 +344,13 @@ extension Editing {
     /// least cropped is the closest to it, and never outside it. A whole
     /// frame crop is a layout that once lost the region (the short did
     /// that), not the region, so it's left out unless it's all there is.
-    static func redactionRegion(of clip: Clip, on track: Track) -> Rect? {
-        guard track.isPrivacy, case .media = clip.content, let video = clip.video,
-              clip.isObscured || track.isSwitchedOffRedaction(clip) else { return nil }
+    static func redactionRegion(of clip: Clip, on track: Track, inferLegacy: Bool = false) -> Rect? {
+        // The clip's own fields first: `isPrivacy` scans the whole track,
+        // and this runs for every clip when matching pictures to copies.
+        guard case .media = clip.content, let video = clip.video,
+              video.redaction != nil || video.redactionSources != nil || (inferLegacy && clip.name?.hasPrefix("Privacy") == true),
+              track.isPrivacy || (inferLegacy && track.name.lowercased().hasPrefix(privacyTrackPrefix)),
+              clip.isObscured || track.isSwitchedOffRedaction(clip) || (inferLegacy && clip.name?.hasPrefix("Privacy") == true) else { return nil }
         if let region = video.redaction { return region }
         let crops = ([video.crop] + video.formatOverrides.values.filter { !$0.hidden }.compactMap(\.crop))
             .filter { $0.left + $0.right < 1 && $0.top + $0.bottom < 1 }
@@ -253,7 +369,7 @@ extension Editing {
     /// track under the run, if it shows the file there.
     static func redactedPictureTrack(of copy: Clip, on location: TrackLocation, in p: Project) -> TrackLocation? {
         func shows(_ clip: Clip) -> Bool {
-            clip.mediaID == copy.mediaID && clip.range.overlaps(copy.range) && !clip.isObscured
+            clip.mediaID == copy.mediaID && clip.range.overlaps(copy.range)
         }
         var below = location.index - 1
         while below >= 0, isPrivacyTrack(p.videoTracks[below]) { below -= 1 }
@@ -294,13 +410,14 @@ extension Editing {
         _ p: inout Project, format: String?, respectLocks: Bool = true,
         where follows: (_ copy: Clip, _ picture: Clip) -> Bool
     ) throws {
-        for trackIndex in p.videoTracks.indices where isPrivacyTrack(p.videoTracks[trackIndex]) {
+        for trackIndex in p.videoTracks.indices where isPrivacyTrack(p.videoTracks[trackIndex]) && !p.videoTracks[trackIndex].hidden {
             let location = TrackLocation(kind: .video, index: trackIndex)
             for index in p[location].clips.indices {
                 let copy = p[location].clips[index]
-                guard let region = redactionRegion(of: copy, on: p[location]) else { continue }
+                guard copy.enabled, copy.video?.redactionVisibility != .disabled, RedactionSafety.effect(on: copy) != nil,
+                      let region = redactionRegion(of: copy, on: p[location]) else { continue }
                 guard let at = redactedPictureTrack(of: copy, on: location, in: p) else { continue }
-                let pictures = p[at].clips.filter { $0.mediaID == copy.mediaID && $0.range.overlaps(copy.range) && !$0.isObscured }
+                let pictures = p[at].clips.filter { $0.mediaID == copy.mediaID && $0.range.overlaps(copy.range) }
                 guard pictures.contains(where: { follows(copy, $0) }) else { continue }
                 let placements = pictures.map { aligned(copy, over: $0, region: region, format: format) }
                 guard let placed = placements.first, placements.contains(where: { $0 != copy }) else { continue }
@@ -363,9 +480,9 @@ extension Editing {
     static func privacyTrack(_ p: inout Project, above sourceID: String, fitting ranges: [TimeRange], _ context: inout EditContext) throws -> TrackLocation {
         guard let source = p.location(ofTrack: sourceID) else { throw EditError.notFound("track \(sourceID)") }
         var index = source.index + 1
-        while index < p.videoTracks.count, isPrivacyTrack(p.videoTracks[index]) {
+        while index < p.videoTracks.count, isPrivacyTrack(p.videoTracks[index]) || (p.videoTracks[index].clips.isEmpty && p.videoTracks[index].name.lowercased().hasPrefix(privacyTrackPrefix)) {
             let track = p.videoTracks[index]
-            if !track.locked, ranges.allSatisfy({ track.isFree($0) }) { return TrackLocation(kind: .video, index: index) }
+            if !track.locked, !track.hidden, ranges.allSatisfy({ track.isFree($0) }) { return TrackLocation(kind: .video, index: index) }
             index += 1
         }
         let stem = "Privacy (\(p[source].name))"
@@ -374,7 +491,7 @@ extension Editing {
             ? (2...).lazy.map { "\(stem) \($0)" }.first { !names.contains($0.lowercased()) }!
             : stem
         try addTrack(&p, kind: .video, name: name, index: index, id: nil, &context)
-        p.videoTracks[index].rippleMode = .cut
+        p.videoTracks[index].rippleMode = p[source].rippleMode
         return TrackLocation(kind: .video, index: index)
     }
 }

@@ -156,7 +156,12 @@ rounds up.
    those: it says the checks didn't run.
 5. **Hand back.** Open the project in the app for Mike with
    `open "<video folder>/<name>.tandem"` (skip it if `tandem status` says
-   the app already has it open), rather than asking him to open it. Then
+   the app already has it open), rather than asking him to open it.
+   Before handing back, `tandem status` must say `open in: the Tandem
+   app`: `open in: nothing else` a few seconds after opening it means the
+   app couldn't open it (its alert, or a warning in `tandem status`, says
+   why; an app older than the installed build is restarted with `tandem
+   quit-app` when none of his projects are open in it). Then
    `tandem handback` with the two to five places he should look at first:
    a stretch of a sweeping change that stands for the rest (one angle pass
    on the Nipunn interview touched 118 clips), the new shot, the thing you
@@ -579,6 +584,8 @@ From his review comments on the Daytona and Build Your Own Convex videos
   on the same open. Typing in built B-roll goes at a speed you could read
   along to, and transitions stay as calm as his delivery. (Demos where speed
   is the point still play in real time, below.)
+- **Before the first hand-back of a long edit, get it reviewed by fresh eyes.** Sub-agents, one per 3 to 5 minute stretch, each read the rules themselves and judge every line against the frames on screen, then you fix what they find (the brief and the steps after it: `~/dev/convex/convex-videos/tools/edit-review/BRIEF.md`). On Sammy Cam that turned "I'm not all that happy with the job" into "wow, it is so much better now... even if that takes longer, burns more tokens... it's 100% worth it" (26 Nov 2026).
+- **What happens inside the shot lands on his word, too.** Edges on cuts aren't enough: on Sammy Cam the dog was still on the floor on "there's Sammy on the sofa" ("The timing is all way off here. You're not showing Sammy on the sofa when I say it", 25 Nov 2026). Slip the source so the action (a hop, a dent, a click, a highlight) lands on the word that names it, and never speed a graphic or recording up or down to fill a gap: cue each element to its word at 1.0x and cut back to his face for the rest.
 - **B-roll starts and ends on sentence boundaries:** the take's cuts, or a
   real pause between words. Never 0.2 s off a cut or mid-word. If less than
   about 1.5 s of camera would show between two B-roll shots, join them. A
@@ -772,11 +779,15 @@ From his review comments on the Daytona and Build Your Own Convex videos
   --privacy` over the whole video, as the last edit before exporting, and
   again with `--format <id>` for each format the project exports (its
   warning names them). It
-  reads a frame every half second as export renders it (blurs in place,
+  reads every output frame from original media as export renders it (blurs in place,
   so text scrolling past a fixed blur shows up) and flags emails, phone
   numbers, addresses, booking references, ID, money, crypto, travel, keys,
-  "before they go public" notes, lists of names and QR codes, each with a
-  `redact` to look at, widen to everything private round it, and apply on
+  "before they go public" notes, lists of names and QR codes, with a
+  `redact` when its source is known. Transition or unknown-source findings
+  need a frame inspection; missing frames or OCR errors fail the scan.
+  Private-looking authored text is still flagged: a matching title cannot
+  prove that text in the underlying footage is safe.
+  For each suggested `redact`, look at it, widen to everything private round it, and apply on
   its own. Then look through every readableText note too, with `tandem
   frames` across it: the rules can't know a plan is internal or a quote is
   someone else's. Don't treat an earlier "leave the blurs off for now" or
@@ -1105,6 +1116,14 @@ scripts and the speaker tracker are in
   repeating it: "we don't need to
   show the question on the screen... because it should get asked at the start
   of the video anyway" (Mike, 4 Nov 2026). Keep the small name line.
+- **Never share the same opening clip across two Shorts in a batch.** On the
+  Abstract Fireside batch, Fireside 1 and Fireside 2 both opened with the exact
+  same ~15 s question/setup from Luke and Meagan; because Instagram auto-picks
+  an early cover frame and autoplays the opening, Sophie flagged Nov 12 as a
+  duplicate upload of Nov 9 even though the clips were completely different
+  (26 Nov 2026). Give every Short from the same talk or interview its own
+  distinct opening shot/question (never reuse the same opening stretch of
+  source timecode across two Shorts).
 - **The filmmaker's own insets are crops too.** Seth's master cut to a tall
   "audience cam" phone inset on the left while people typed on calculators:
   it's nearly 9:16 already, so crop straight onto it, and back to the speaker
@@ -1397,7 +1416,11 @@ minutes over three rounds. What his comments asked for:
   zoomed in"). Text-aware upscaling is being looked at separately.
 - **Gags he asked for:** a Windows logo with a crying emoji popping up on
   "sorry Windows users"; a cartoon of his Mac mini Bruce as an Aussie bloke
-  in a cork hat (Codex image tool); the pairing QR code replaced with a
+  in a cork hat (Codex image tool), who from Sammy Cam on says "G'day mate!"
+  every time he appears (`shared:Sound effects/Bruce/Bruce says G'day
+  mate.wav`, the moment he lands on screen, at `normalizeTo: -26`, but
+  not again within a minute or so: "a couple too many... might get a bit
+  annoying"); the pairing QR code replaced with a
   Rickroll QR rather than blurred ("it'd be funny to see if anybody actually
   tries scanning that QR code").
 - **The outro, as usual:** a title-less `Convex wipe` segment before the

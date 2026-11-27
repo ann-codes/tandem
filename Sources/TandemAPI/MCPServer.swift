@@ -351,7 +351,9 @@ public final class MCPServer: @unchecked Sendable {
             result = try EffectsResult.catalog(type: effects.type) as! C.Result
         } else {
             let url = try ProjectLocator.find(projectPath ?? options.project, in: options.directory, environment: options.environment)
-            result = try await makeClient(url, author).call(call)
+            let client = makeClient(url, author)
+            // A stale app, or a hand-back nothing will show (AppBuild.noting).
+            result = AppBuild.noting(try await client.call(call), route: client.route, projectURL: url)
         }
         var content: [JSONValue] = []
         if let image = result as? ImageResult, let png = image.png {
@@ -956,7 +958,7 @@ enum MCPTools {
             properties: [
                 "id": S.string("An asset ID from assets_search, like noto:1f680 or import:..."),
                 "at": time("Place it here on the timeline. Leave out to only add it to the media."),
-                "duration": time("How long the clip lasts. Default: all of it (5 s for a still)."),
+                "duration": time("How long the clip lasts. Default: all of it (5 s for a still, at least 2 s for a sticker). A sticker held longer than its file holds its last frame."),
                 "mode": S.enumeration(["place", "overwrite", "insert"], "place (default) fails if its track is taken there."),
                 "anchor": S.enumeration(StickerAnchor.allCases.map(\.rawValue), "Where a picture sits: fitted to 40% of the frame's width and 30% of its height at this edge or corner. Stickers default to bottom."),
                 "pop": S.boolean("Pop it in at the start and out at the end."),

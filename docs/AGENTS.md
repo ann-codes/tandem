@@ -272,7 +272,7 @@ follows.
 - `tandem check --privacy` before every export: private text a viewer
   could read (emails, phone numbers, addresses, references, ID, money,
   crypto, travel, keys, notes marked private, family, lists of names, QR
-  codes), each with a `redact` to look at and widen, and every stretch
+  codes), with a `redact` suggestion when its source is known, and every stretch
   of readable text to look through ([recipe](agents/layout-and-colour.md#find-private-text-before-export)).
 - `tandem claims` once the take is cut: every line that names something
   or makes a claim, with what's on screen over it. Answer each in
@@ -355,6 +355,7 @@ One line each; `tandem help <command>` has the options and what they do.
 | `tandem serve` | hold the project and serve the API headless |
 | `tandem mcp` | the MCP server on stdin and stdout |
 | `tandem app`, `tandem url` | open the editor; drive it by link (from the launcher, for work on Tandem itself) |
+| `tandem quit-app` | quit the app like Cmd-Q (projects save; refuses while an export renders), so the next open runs the installed build |
 
 Edit commands are listed one per line, by group, in
 [agents/edit-commands.md](agents/edit-commands.md#every-command), and

@@ -313,11 +313,17 @@ final class RedactTests: XCTestCase {
         // Copies made before the region was kept, laid out by the old short:
         // a whole-frame crop in the portrait format.
         let (c, screen, copy) = try shortReady()
-        try c.run("Old short", .updateClip(clipID: copy.id, patch: .object(["video": .object([
+        var legacy = c.project
+        let at = legacy.location(ofClip: copy.id)!
+        legacy[at.track].clips[at.index] = try JSONValue.applyMergePatch(.object(["video": .object([
             "redaction": .null,
             "formatOverrides": .object(["portrait": .object(["crop": .object(["left": .number(0)]), "transform": .object(["position": .object(["x": .number(0.5), "y": .number(0.25)]), "scale": .number(1)])])])
-        ])])))
-        XCTAssertNil(c.project.clip(copy.id)?.video?.redaction)
+        ])]), to: copy)
+        legacy[at.track].clips[at.index].video?.redactionSources = nil
+        legacy.sourceRedactions = nil
+        legacy.schemaVersion = 2
+        c.reload(legacy)
+        XCTAssertNil(c.project.clip(copy.id)?.video?.redaction, "construct the historical saved state directly")
         try c.run("Short", .setFormatLayout(clipIDs: [screen.id], format: "portrait", slot: .top))
         try c.run("Adopt", .adoptFormat(format: "portrait"))
         let adopted = try XCTUnwrap(c.project.clip(copy.id)?.video)
@@ -351,11 +357,11 @@ final class RedactTests: XCTestCase {
 
     func testABlurFollowsThePictureItWasMadeOverNotAnotherOfTheSameFile() throws {
         // The same recording twice: full frame on "Screen", and as a PiP
-        // on a track above. Only the PiP is redacted.
+        // on a track above. Both occurrences of the private source are protected.
         let (_, c) = try Fixture.edited()
         try c.run("Track", .addTrack(kind: .video, name: "Screen PiP", index: c.project.videoTracks.count, id: "trk_pip"))
-        try c.run("PiP", .placeMedia(mediaIDs: ["med_screen"], at: .zero, duration: t(60), videoTrackID: "trk_pip", includeAudio: false))
-        try c.run("Hide", .redact(range: TimeRange(start: t(10), end: t(15)), rect: email, trackID: "trk_pip"))
+        try c.run("PiP", .placeMedia(mediaIDs: ["med_screen"], at: .zero, sourceStart: c.clips("Screen")[0].sourceStart, duration: t(60), videoTrackID: "trk_pip", includeAudio: false))
+        try c.run("Hide", .redact(range: TimeRange(start: t(10), end: t(15)), rect: email, mediaID: "med_screen"))
         let pip = try XCTUnwrap(c.clips("Screen PiP").first { $0.range.start == t(10) })
         let copy = try XCTUnwrap(c.clips("Privacy (Screen PiP)").first)
         try c.run("Corner", .applyLayout(clipIDs: [pip.id], preset: .pipLeft))
@@ -365,7 +371,6 @@ final class RedactTests: XCTestCase {
 
         // The full-frame one redacted too, its privacy track then dragged
         // above the PiP's: it still follows its own picture, by its link.
-        try c.run("Hide", .redact(range: TimeRange(start: t(10), end: t(15)), rect: email, trackID: c.project.track(named: "Screen")!.id))
         let full = try XCTUnwrap(c.clips("Screen").first { $0.range.start == t(10) })
         let fullCopy = try XCTUnwrap(c.clips("Privacy (Screen)").first)
         try c.run("Drag", .moveTrack(trackID: c.project.track(named: "Privacy (Screen)")!.id, index: c.project.videoTracks.count - 1))
@@ -399,11 +404,10 @@ final class RedactTests: XCTestCase {
         let (c, _, copy) = try shortReady()
         let privacy = try XCTUnwrap(c.project.track(named: "Privacy (Screen)"))
         try c.run("Lock", .updateTrack(trackID: privacy.id, patch: .object(["locked": .bool(true)])))
-        try c.run("Blade", .blade(at: t(12), trackIDs: [c.project.track(named: "Screen")!.id]))
-        XCTAssertEqual(c.project.clip(copy.id)?.range, TimeRange(start: t(10), end: t(15)), "the copy wasn't cut")
-        let right = try XCTUnwrap(c.clips("Screen").first { $0.range.start == t(12) })
-        XCTAssertThrowsError(try c.run("Short", .setFormatLayout(clipIDs: [right.id], format: "portrait", slot: .top)))
-        XCTAssertNil(c.project.clip(right.id)?.video?.formatOverrides["portrait"], "nothing moved")
+        let before = c.project
+        XCTAssertThrowsError(try c.run("Blade", .blade(at: t(12), trackIDs: [c.project.track(named: "Screen")!.id])))
+        XCTAssertEqual(c.project, before, "the locked blade refuses atomically")
+        XCTAssertEqual(c.project.clip(copy.id)?.range, TimeRange(start: t(10), end: t(15)))
     }
 
     func testABlurShowsItsRegionWhereThePicturesAnimatedCropDoes() throws {
@@ -441,6 +445,205 @@ final class RedactTests: XCTestCase {
         ])
         XCTAssertEqual(copies.map(\.enabled), [true, false, true])
         assertCovered(c, "Privacy (Angle 2)")
+    }
+
+    /// Sammy Cam: one 30 fps night shot placed as two clips side by side on
+    /// B-roll, both a few ms off the frame grid. Its first clip redacted
+    /// fine, but a redact ending partway through the second was refused as
+    /// exposing a protected region, and so was a second region stacked on
+    /// the second's tail. Cut at the project's frame, 553.3, the take split
+    /// partway through the file's frame 88.3...88.333, which the copy then
+    /// claimed, leaving it unhidden on the piece after (or the one before).
+    func offGridBroll() throws -> ProjectCoordinator {
+        var fixture = Fixture()
+        fixture.project.media.append(MediaItem(
+            id: "med_night", path: "broll/night.mp4", kind: .video, role: .broll,
+            duration: t(510.534), frameRate: .fps30, width: 1920, height: 1080, hasVideo: true, hasAudio: true
+        ))
+        let c = ProjectCoordinator(project: fixture.project)
+        try c.run("Place", .placeMedia(mediaIDs: ["med_night"], at: t(537.557), sourceStart: t(67.5), duration: t(12.934), includeAudio: false),
+                  .placeMedia(mediaIDs: ["med_night"], at: t(550.491), sourceStart: t(85.5), duration: t(4.866), includeAudio: false))
+        XCTAssertEqual(c.clips("B-roll").map(\.range), [TimeRange(start: t(537.557), end: t(550.491)), TimeRange(start: t(550.491), end: t(555.357))])
+        return c
+    }
+
+    func testARangeEndingPartwayThroughAClipNextToAProtectedOneIsHidden() throws {
+        let c = try offGridBroll()
+        let kids = Rect(x: 0.44, y: 0.13, width: 0.13, height: 0.2)
+        try c.run("First", .redact(range: TimeRange(start: t(537.557), end: t(550.491)), rect: kids, mediaID: "med_night"))
+        try c.run("Second", .redact(range: TimeRange(start: t(550.491), end: t(553.291)), rect: Rect(x: 0.46, y: 0.18, width: 0.1, height: 0.16), mediaID: "med_night"))
+
+        let pieces = c.clips("B-roll")
+        XCTAssertEqual(pieces.map(\.range), [
+            TimeRange(start: t(537.557), end: t(550.491)), TimeRange(start: t(550.491), end: t(553.291)), TimeRange(start: t(553.291), end: t(555.357))
+        ], "cut where the file's frame 88.3 starts, not partway through it")
+        XCTAssertEqual(pieces[2].sourceStart, t(88.3))
+        XCTAssertEqual(c.clips("Privacy (B-roll)").map(\.range), Array(pieces.map(\.range).prefix(2)))
+        assertCovered(c, "Privacy (B-roll)")
+        // The tail stays sharp: no protected frame shows on it.
+        XCTAssertFalse(RedactionSafety.protections(in: c.project).flatMap(\.sources).contains { $0.end > t(88.3) + Time.overlapTolerance })
+        assertValid(c.project)
+    }
+
+    func testASecondRegionStackedOnAProtectedClipsTailIsHidden() throws {
+        let c = try offGridBroll()
+        let first = Rect(x: 0.46, y: 0.18, width: 0.1, height: 0.16)
+        try c.run("Whole", .redact(range: TimeRange(start: t(550.491), end: t(555.357)), rect: first, mediaID: "med_night"))
+        try c.run("Tail", .redact(range: TimeRange(start: t(553.291), end: t(555.357)), rect: Rect(x: 0.46, y: 0.3, width: 0.1, height: 0.1), mediaID: "med_night"))
+
+        let pieces = Array(c.clips("B-roll").map(\.range).dropFirst())
+        XCTAssertEqual(pieces, [TimeRange(start: t(550.491), end: t(553.291)), TimeRange(start: t(553.291), end: t(555.357))])
+        XCTAssertEqual(c.clips("Privacy (B-roll)").map(\.range), pieces, "the first copy cut with the take")
+        XCTAssertEqual(c.clips("Privacy (B-roll) 2").map(\.range), [TimeRange(start: t(553.291), end: t(555.357))])
+        assertCovered(c, "Privacy (B-roll)")
+        assertCovered(c, "Privacy (B-roll) 2")
+        assertValid(c.project)
+    }
+
+    func testAMidClipEdgeOffTheFilesFrameGoesOutToItAndExposureIsStillRefused() throws {
+        let c = try offGridBroll()
+        let region = Rect(x: 0.46, y: 0.18, width: 0.1, height: 0.16)
+        // 553.3 is on the project's frame grid but 9 ms into the file's
+        // frame 88.3...88.333, so that frame's hidden too.
+        try c.run("Hide", .redact(range: TimeRange(start: t(550.491), end: t(553.3)), rect: region, mediaID: "med_night"))
+        XCTAssertEqual(c.clips("B-roll").map(\.range).last, TimeRange(start: t(550.491 + 2.8 + 1.0 / 30), end: t(555.357)))
+        assertCovered(c, "Privacy (B-roll)")
+        // Moving the sharp tail back over a protected frame is still refused.
+        let tail = try XCTUnwrap(c.clips("B-roll").last)
+        let before = c.project
+        XCTAssertThrowsError(try c.run("Slip", .slip(clipID: tail.id, delta: t(-0.1)))) { error in
+            XCTAssertTrue("\(error)".contains("expose a protected source region"), "\(error)")
+        }
+        XCTAssertEqual(c.project, before)
+    }
+
+    /// One file, 3 s of it from its start on B-roll.
+    func oneClip(_ rate: FrameRate, speed: Double? = nil, sourceStart: Time = .zero, duration: Time = t(3)) throws -> ProjectCoordinator {
+        var fixture = Fixture()
+        fixture.project.media.append(MediaItem(
+            id: "med_clip", path: "broll/clip.mp4", kind: .video, role: .broll,
+            duration: t(60), frameRate: rate, width: 1920, height: 1080, hasVideo: true, hasAudio: false
+        ))
+        let c = ProjectCoordinator(project: fixture.project)
+        try c.run("Place", .placeMedia(mediaIDs: ["med_clip"], at: .zero, sourceStart: sourceStart, duration: duration, includeAudio: false, speed: speed))
+        return c
+    }
+
+    func testAMidClipEdgeOnA2997FileIsCutOnTheSharpSideOfItsFramesStart() throws {
+        // A 29.97 fps frame rarely starts on a 48 kHz sample, where times
+        // are kept, so the nearest sample can be inside the next frame.
+        let c = try oneClip(FrameRate(30000, 1001))
+        try c.run("Hide", .redact(range: TimeRange(start: .zero, end: t(1.0333333)), rect: email, mediaID: "med_clip"))
+        try c.run("Hide", .redact(range: TimeRange(start: t(2.0), end: t(3)), rect: email, mediaID: "med_clip"))
+        XCTAssertEqual(c.clips("Privacy (B-roll)").count, 2)
+        assertCovered(c, "Privacy (B-roll)")
+        assertValid(c.project)
+    }
+
+    func testAMidClipRangeOnASlowedClipIsCutOnTheFilesFrames() throws {
+        let c = try oneClip(.fps30, speed: 0.9)
+        try c.run("Hide", .redact(range: TimeRange(start: t(0.2666667), end: t(0.4)), rect: email, mediaID: "med_clip"))
+        XCTAssertEqual(c.clips("Privacy (B-roll)").count, 1)
+        assertCovered(c, "Privacy (B-roll)")
+    }
+
+    func testEveryFrameShownInTheRangeIsHiddenOnSlowMotion() throws {
+        // A 25 fps file at quarter speed: a file frame lasts 0.16 s, five
+        // of the project's frames, so an edge rounded to the nearest one
+        // left the frame shown at 0.967 sharp.
+        let c = try oneClip(.fps25, speed: 0.25)
+        try c.run("Hide", .redact(range: TimeRange(start: t(0.2), end: t(1.0)), rect: email, mediaID: "med_clip"))
+        let copy = try XCTUnwrap(c.clips("Privacy (B-roll)").first)
+        XCTAssertLessThanOrEqual(copy.start, t(0.2))
+        XCTAssertGreaterThanOrEqual(copy.end, t(1.0))
+        assertCovered(c, "Privacy (B-roll)")
+    }
+
+    func testAFrameShownInTheRangeIsHiddenOnVerySlowMotionToo() throws {
+        // A millisecond's leeway at the edge, taken in the file's time, is
+        // a tenth of a second on the timeline at 1%: the frame at 1.0 was left sharp.
+        let c = try oneClip(.fps30, speed: 0.01, sourceStart: t(0.0235))
+        try c.run("Hide", .redact(range: TimeRange(start: t(0.2), end: t(1.0333333)), rect: email, mediaID: "med_clip"))
+        let copy = try XCTUnwrap(c.clips("Privacy (B-roll)").first)
+        XCTAssertLessThanOrEqual(copy.start, t(0.2))
+        XCTAssertGreaterThan(copy.end, t(1.0))
+        assertCovered(c, "Privacy (B-roll)")
+    }
+
+    func testAnEndNoSampleLandsNearOnAFrameStartSaysSo() throws {
+        // 29.97 fps at 0.9x: none of the next eight frame starts falls on a sample.
+        let c = try oneClip(FrameRate(30000, 1001), speed: 0.9)
+        XCTAssertThrowsError(try c.run("Hide", .redact(range: TimeRange(start: t(0.4), end: t(0.7666667)), rect: email, mediaID: "med_clip"))) { error in
+            XCTAssertTrue("\(error)".contains("Couldn't end the redaction") || "\(error)".contains("Couldn't start the redaction"), "\(error)")
+        }
+    }
+
+    func testLinkedClipsOfOneFileInStepButOfDifferentLengthsAreBothHidden() throws {
+        let c = try oneClip(.fps30, duration: t(4))
+        let screen = try XCTUnwrap(c.project.track(named: "Screen"))
+        try c.run("Again", .placeMedia(mediaIDs: ["med_clip"], at: .zero, sourceStart: .zero, duration: t(3), videoTrackID: screen.id, includeAudio: false))
+        try c.run("Link", .link(clipIDs: [c.clips("B-roll")[0].id, c.clips("Screen")[0].id]))
+        try c.run("Hide", .redact(range: TimeRange(start: t(1), end: t(3.5)), rect: email, mediaID: "med_clip"))
+        XCTAssertEqual(c.clips("Privacy (Screen)").map(\.range), [TimeRange(start: t(1), end: t(3))])
+        XCTAssertEqual(c.clips("Privacy (B-roll)").map(\.range), [TimeRange(start: t(1), end: t(3.5))])
+        assertCovered(c, "Privacy (Screen)")
+        assertCovered(c, "Privacy (B-roll)")
+    }
+
+    func testASlowedLinkedClipWhoseHeadWasCutFirstStillEndsOnAFrame() throws {
+        // The shorter clip's cut at the range's start rebases the longer
+        // one's piece a sample off the original, so its end is worked out again.
+        let c = try oneClip(.fps30, speed: 0.9)
+        let screen = try XCTUnwrap(c.project.track(named: "Screen"))
+        try c.run("Again", .placeMedia(mediaIDs: ["med_clip"], at: .zero, sourceStart: .zero, duration: t(0.35), videoTrackID: screen.id, includeAudio: false, speed: 0.9))
+        try c.run("Link", .link(clipIDs: [c.clips("B-roll")[0].id, c.clips("Screen")[0].id]))
+        try c.run("Hide", .redact(range: TimeRange(start: t(0.2333333), end: t(0.4333333)), rect: email, mediaID: "med_clip"))
+        assertCovered(c, "Privacy (Screen)")
+        assertCovered(c, "Privacy (B-roll)")
+    }
+
+    func testAFrameStartingJustAfterTheRangesStartIsntLeftSharpBeforeIt() throws {
+        // 29.97 fps: the file's frame 30 starts at 1.001, so the frame shown
+        // at 1.0, frame 29, is in the range and hidden too.
+        let c = try oneClip(FrameRate(30000, 1001))
+        try c.run("Hide", .redact(range: TimeRange(start: t(1), end: t(2)), rect: email, mediaID: "med_clip"))
+        XCTAssertLessThanOrEqual(try XCTUnwrap(c.clips("Privacy (B-roll)").first).start, t(1))
+        // A second region over the piece before still meets it on a frame.
+        try c.run("Before", .redact(range: TimeRange(start: .zero, end: t(1)), rect: Rect(x: 0.6, y: 0.6, width: 0.2, height: 0.2), mediaID: "med_clip"))
+        assertCovered(c, "Privacy (B-roll)")
+        assertValid(c.project)
+    }
+
+    func testThreeLinkedSlowedClipsOfOneFileAreAllHidden() throws {
+        let c = try oneClip(.fps30, speed: 0.9)
+        let screen = try XCTUnwrap(c.project.track(named: "Screen")), camera = try XCTUnwrap(c.project.track(named: "Camera"))
+        try c.run("Again", .placeMedia(mediaIDs: ["med_clip"], at: .zero, sourceStart: .zero, duration: t(0.35), videoTrackID: screen.id, includeAudio: false, speed: 0.9),
+                  .placeMedia(mediaIDs: ["med_clip"], at: .zero, sourceStart: .zero, duration: t(3), videoTrackID: camera.id, includeAudio: false, speed: 0.9))
+        try c.run("Link", .link(clipIDs: [c.clips("B-roll")[0].id, c.clips("Screen")[0].id, c.clips("Camera")[0].id]))
+        try c.run("Hide", .redact(range: TimeRange(start: t(0.2333333), end: t(0.4333333)), rect: email, mediaID: "med_clip"))
+        for track in ["Privacy (Screen)", "Privacy (Camera)", "Privacy (B-roll)"] { assertCovered(c, track) }
+    }
+
+    func testAStartNeverMovesIntoTheRangeOnTheSlowestClip() throws {
+        // At the slowest speed a source sample is most of a timeline frame,
+        // so the sample a frame starts on can sit inside the range.
+        let c = try oneClip(.fps30, speed: 0.0001, sourceStart: Time(flicks: 1599 * Time.flicksPerSample48k))
+        do {
+            try c.run("Hide", .redact(range: TimeRange(start: t(4.0 / 30), end: t(3)), rect: email, mediaID: "med_clip"))
+            XCTAssertLessThanOrEqual(try XCTUnwrap(c.clips("Privacy (B-roll)").first).start, t(4.0 / 30))
+        } catch {
+            XCTAssertTrue("\(error)".contains("Couldn't start the redaction"), "\(error)")
+        }
+    }
+
+    func testLinkedClipsOfOneFileAtDifferentPointsInItsFramesSayToUnlinkThem() throws {
+        let c = try oneClip(.fps30)
+        let screen = try XCTUnwrap(c.project.track(named: "Screen"))
+        try c.run("Again", .placeMedia(mediaIDs: ["med_clip"], at: .zero, sourceStart: t(0.009), duration: t(3), videoTrackID: screen.id, includeAudio: false))
+        try c.run("Link", .link(clipIDs: [c.clips("B-roll")[0].id, c.clips("Screen")[0].id]))
+        XCTAssertThrowsError(try c.run("Hide", .redact(range: TimeRange(start: t(1), end: t(2)), rect: email, mediaID: "med_clip"))) { error in
+            XCTAssertTrue("\(error)".contains("Unlink them first"), "\(error)")
+        }
     }
 
     func testSaysWhatsWrong() throws {

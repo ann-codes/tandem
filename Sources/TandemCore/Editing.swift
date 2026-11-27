@@ -6,8 +6,67 @@ import Foundation
 /// whole batch on a copy of the project and only commits it if every command
 /// succeeds and the result validates.
 public enum Editing {
+    /// Commit, recovery and preflight share the same atomic batch validation.
+    @discardableResult
+    public static func apply(_ batch: EditBatch, to project: inout Project, context: inout EditContext) throws -> [ValidationIssue] {
+        var working = project
+        var pending = context
+        pending.defersPrivacyCoverage = true
+        // The batch's commands share what they learn about the media files,
+        // and each batch looks at the disk afresh.
+        let files = RedactionSafety.FileLookups()
+        pending.privacyFiles = files
+        for (index, command) in batch.commands.enumerated() {
+            do { try apply(command, to: &working, context: &pending) }
+            catch let error as EditError where batch.commands.count > 1 {
+                throw EditError.invalid("command \(index + 1) of \(batch.commands.count): \(error.description)")
+            }
+        }
+        try RedactionSafety.requireCoverage(working, protecting: RedactionSafety.protections(in: working), files: files)
+        let issues = ProjectValidator.validate(working)
+        if let first = issues.first(where: { $0.severity == .error }) { throw EditError.invalid(first.message) }
+        pending.defersPrivacyCoverage = context.defersPrivacyCoverage
+        // They don't outlive the batch: a context used again looks again.
+        pending.privacyFiles = context.privacyFiles
+        project = working
+        context = pending
+        return issues
+    }
+
     public static func apply(_ submitted: EditCommand, to project: inout Project, context: inout EditContext) throws {
+        var working = project
+        var pending = context
+        try applyUnchecked(submitted, to: &working, context: &pending)
+        if !pending.defersPrivacyCoverage, let error = ProjectValidator.validate(working).first(where: { $0.severity == .error }) {
+            throw EditError.invalid(error.message)
+        }
+        project = working
+        context = pending
+    }
+
+    /// Applies commands for a preview that's never committed, like a drag's
+    /// on each pointer move, with file lookups the caller keeps from one
+    /// preview to the next, so the privacy checks don't resolve and stat
+    /// every media file each time. What the preview shows is committed
+    /// later as an ordinary edit, which looks at the files again.
+    public static func preview(_ commands: [EditCommand], to project: inout Project, context: inout EditContext, files: RedactionSafety.FileLookups) throws {
+        var working = project
+        var pending = context
+        pending.privacyFiles = files
+        for command in commands { try apply(command, to: &working, context: &pending) }
+        pending.privacyFiles = context.privacyFiles
+        project = working
+        context = pending
+    }
+
+    private static func applyUnchecked(_ submitted: EditCommand, to project: inout Project, context: inout EditContext) throws {
         let command = try resolvingTrackNames(in: submitted, project)
+        RedactionSafety.rememberSources(&project)
+        // A command on its own looks at the files afresh; one in a batch or
+        // a preview shares the lookups its batch or preview made.
+        let files = context.privacyFiles ?? RedactionSafety.FileLookups()
+        RedactionSafety.rememberPolicies(&project, sourceFolder: context.sourceFolder, files: files)
+        let privacyBefore = project
         // Transitions' sounds are kept in step with them after whatever
         // this command does (`TransitionSounds`).
         let sounds = TransitionSounds.anchors(in: project)
@@ -42,6 +101,9 @@ public enum Editing {
         case .placeSynced(let mediaID, let trackID):
             try SyncedPlacement.place(&project, mediaID: mediaID, trackID: trackID, &context)
         case .insertClip(let trackID, let clip, let mode):
+            guard !clip.isRedaction else {
+                throw EditError.invalid("Privacy source fields are created by redact. Insert the picture and redact it in the same batch.")
+            }
             try insertClip(&project, trackID: trackID, clip: clip, mode: mode ?? .place, &context)
         case .removeClips(let clipIDs, let ripple, let includeLinked):
             try removeClips(&project, clipIDs, ripple: ripple ?? false, includeLinked: includeLinked ?? true, &context)
@@ -132,6 +194,7 @@ public enum Editing {
         TransitionSounds.reconcile(&project, from: sounds, named: named, createdFrom: created, &context)
         context.placedSounds = []
         project.normalizeLinkGroups()
+        try RedactionSafety.reconcile(&project, before: privacyBefore, command: command, validateCoverage: !context.defersPrivacyCoverage, sourceFolder: context.sourceFolder, files: files, cutFrom: context.cutFrom)
     }
 
     // MARK: - Lookups
@@ -258,8 +321,8 @@ public enum Editing {
         let old = p.settings
         let settings = try JSONValue.applyMergePatch(patch, to: p.settings)
         guard settings.width > 0, settings.height > 0 else { throw EditError.invalid("canvas size must be positive") }
-        guard settings.frameRate.numerator > 0, settings.frameRate.denominator > 0 else {
-            throw EditError.invalid("frame rate must be positive")
+        guard settings.frameRate.isUsable else {
+            throw EditError.invalid("frame rate must be between 0.01 and 10,000 fps")
         }
         if settings.frameRate != old.frameRate {
             context.warn("Frame rate changed to \(settings.frameRate.framesPerSecond) fps. Existing cuts keep their times, so some may fall between frames.")
@@ -386,6 +449,7 @@ public enum Editing {
 
     static func moveTrack(_ p: inout Project, _ trackID: String, _ index: Int) throws {
         let location = try requireTrack(p, trackID)
+        try requireUnlocked(p[location])
         if location.kind == .video {
             let track = p.videoTracks.remove(at: location.index)
             p.videoTracks.insert(track, at: min(max(index, 0), p.videoTracks.count))
@@ -398,7 +462,11 @@ public enum Editing {
     static func updateTrack(_ p: inout Project, _ trackID: String, _ patch: JSONValue) throws {
         let location = try requireTrack(p, trackID)
         try requireObject(patch, forbidden: ["id", "kind", "clips", "transitions"], what: "track")
-        p[location] = try JSONValue.applyMergePatch(patch, to: p[location])
+        let updated = try JSONValue.applyMergePatch(patch, to: p[location])
+        if p[location].isPrivacy, p[location].locked, updated.locked, updated != p[location] {
+            throw EditError.invalid("Privacy track \(p[location].name) is locked. Unlock it before changing its visibility or settings.")
+        }
+        p[location] = updated
     }
 
     // MARK: - Media
@@ -475,6 +543,11 @@ public enum Editing {
             guard let item = p.media(mediaID) else { throw EditError.notFound("media \(mediaID)") }
             if track.kind == .video && !(item.hasVideo || item.kind == .image) {
                 throw EditError.invalid("\(item.path) has no picture, so it can't go on video track \"\(track.name)\"")
+            }
+            if track.kind == .audio && clip.isRedaction {
+                // Ownership and timing guards only follow privacy copies on
+                // video tracks, so a copy can't detour through audio.
+                throw EditError.invalid("a privacy copy can't go on audio track \"\(track.name)\"; it stays on its privacy track")
             }
             if track.kind == .audio && !item.hasAudio {
                 throw EditError.invalid("\(item.path) has no sound, so it can't go on audio track \"\(track.name)\"")
@@ -559,11 +632,36 @@ public enum Editing {
         _ context: inout EditContext
     ) throws -> TrackLocation {
         if let name = trackName(for: role, kind: kind), let track = p.track(named: name, kind: kind),
-           let location = p.location(ofTrack: track.id), !track.locked {
+           let location = p.location(ofTrack: track.id), !track.locked, !track.isPrivacy,
+           !(kind == .video && track.hidden && (role == .sticker || role == .graphic)) {
             return location
         }
         let tracks = kind == .video ? p.videoTracks : p.audioTracks
-        if let index = tracks.firstIndex(where: { !$0.locked && (!requireFree || $0.isFree(range)) }) {
+        let usable = { (track: Track) in !track.locked && !track.isPrivacy && (!requireFree || track.isFree(range)) }
+        // A sticker or graphic sits over the picture, so without its track
+        // it takes the first free one above everything showing there, or a
+        // new one on top: under the full-frame camera nobody sees it, and
+        // overwriting another track would cut the footage or titles there.
+        // A take track (`.cut`) is left alone, as an insert on one opens a
+        // gap in the whole film.
+        if kind == .video, role == .sticker || role == .graphic {
+            let picture = tracks.lastIndex { !$0.hidden && !$0.isFree(range) } ?? -1
+            if let index = tracks.indices.first(where: { index in
+                let track = tracks[index]
+                return index > picture && track.rippleMode != .cut && !track.locked && !track.hidden && !track.isPrivacy && track.isFree(range)
+            }) {
+                return TrackLocation(kind: kind, index: index)
+            }
+            let name = trackName(for: role, kind: kind) ?? "Graphics"
+            let taken = Set(p.videoTracks.map { $0.name.lowercased() })
+            let free = taken.contains(name.lowercased()) ? (2...).lazy.map { "\(name) \($0)" }.first { !taken.contains($0.lowercased()) }! : name
+            try addTrack(&p, kind: kind, name: free, index: nil, id: nil, &context)
+            // Like the standard Graphics track, it moves with ripple edits
+            // rather than cutting the whole film around a sticker.
+            p.videoTracks[p.videoTracks.count - 1].rippleMode = .follow
+            return TrackLocation(kind: kind, index: p.videoTracks.count - 1)
+        }
+        if let index = tracks.firstIndex(where: usable) {
             return TrackLocation(kind: kind, index: index)
         }
         try addTrack(&p, kind: kind, name: trackName(for: role, kind: kind), index: nil, id: nil, &context)
@@ -610,8 +708,15 @@ public enum Editing {
         let shortest = available.min { $0.length < $1.length }
         // `duration` is time on the timeline, so at a speed it plays
         // `duration * speed` of the media.
-        let length = duration ?? shortest.map { $0.length.scaled(by: 1 / (speed ?? 1)) } ?? Time(seconds: 5)
+        var length = duration ?? shortest.map { $0.length.scaled(by: 1 / (speed ?? 1)) } ?? Time(seconds: 5)
         guard length > .zero else { throw EditError.invalid("nothing left to place after the source start") }
+        // A sticker is a picture held on screen, and an animated one's file
+        // is often shorter than anyone would show it: Noto's alarm clock is
+        // 0.567 s, gone before it's seen and too short to pop. It stays up
+        // for at least `stickerMinimum`, holding its last frame.
+        if duration == nil, items.count == 1, items[0].role == .sticker, length < stickerMinimum {
+            length = stickerMinimum
+        }
         let range = TimeRange(start: at, duration: length)
 
         // Work out every clip and its track first.
@@ -646,10 +751,21 @@ public enum Editing {
                     sourceStart: item.kind == .image ? .zero : start,
                     speed: item.kind == .image ? 1 : speed ?? 1
                 )
+                // A sticker is held past the end of its file rather than
+                // refused (its sound, if it has any, goes quiet there), as
+                // long as it starts inside the file.
+                if item.role == .sticker, item.kind != .image, let limit = p.sourceLimit(for: clip),
+                   clip.sourceStart < limit, clip.sourceEnd > limit + p.settings.frameRate.frameDuration {
+                    clip.holdEdges = true
+                }
                 if kind == .audio {
                     clip.audio = AudioLevels.placedAudio(role: item.role, on: p[location], settings: p.settings)
                 } else {
-                    place(&clip, item, anchor: anchor ?? (item.role == .sticker ? .bottom : nil), pop: pop, in: p)
+                    let popped = place(&clip, item, anchor: anchor ?? (item.role == .sticker ? .bottom : nil), pop: pop, in: p)
+                    if pop, !popped {
+                        let seconds = { (time: Time) in String(format: "%g s", (time.seconds * 1000).rounded() / 1000) }
+                        context.warn("\(clip.name ?? "The picture") is on screen for \(seconds(clip.duration)), too short to pop in and out (that needs \(seconds(StickerAnchor.shortestPop))), so it has no pop.")
+                    }
                 }
                 planned.append((location, clip))
             }
@@ -692,7 +808,9 @@ public enum Editing {
     /// Puts a newly placed picture at its anchor (stickers go to the bottom
     /// unless told otherwise; everything else fills the frame as before)
     /// and pops it in and out if asked.
-    static func place(_ clip: inout Clip, _ item: MediaItem, anchor: StickerAnchor?, pop: Bool, in p: Project) {
+    /// True when it popped.
+    @discardableResult
+    static func place(_ clip: inout Clip, _ item: MediaItem, anchor: StickerAnchor?, pop: Bool, in p: Project) -> Bool {
         var scale = 1.0
         if let anchor {
             let canvas = (width: Double(p.settings.width), height: Double(p.settings.height))
@@ -701,11 +819,16 @@ public enum Editing {
             clip.video = VideoProperties(transform: transform)
             scale = transform.scale
         }
-        if pop {
-            let keys = StickerAnchor.pop(scale: scale, duration: clip.duration)
-            if !keys.isEmpty { clip.keyframes["video.transform.scale"] = keys }
-        }
+        guard pop else { return false }
+        let keys = StickerAnchor.pop(scale: scale, duration: clip.duration)
+        guard !keys.isEmpty else { return false }
+        clip.keyframes["video.transform.scale"] = keys
+        return true
     }
+
+    /// How long a sticker placed without a duration stays on screen at
+    /// least.
+    static let stickerMinimum = Time(seconds: 2)
 
     // MARK: - Ripple helpers
 
@@ -1283,11 +1406,29 @@ public enum Editing {
     }
 
     static func updateClip(_ p: inout Project, _ clipID: String, _ patch: JSONValue, _ context: inout EditContext) throws {
+        if patchSets(patch, "video", "redaction") || patchSets(patch, "video", "redactionSources") || patchSets(patch, "video", "redactionEffectID") || patchSets(patch, "video", "redactionOriginID") || patchSets(patch, "video", "redactionVisibility") {
+            throw EditError.invalid("Privacy source intent cannot be replaced by a clip patch. Use the redaction's enabled or effect controls.")
+        }
         let (location, index) = try requireClip(p, clipID)
         try requireUnlocked(p[location])
         try requireObject(patch, forbidden: ["id"], what: "clip")
         let before = p[location].clips[index]
         var clip = try JSONValue.applyMergePatch(patch, to: before)
+        if before.isRedaction {
+            guard clip.content == before.content else {
+                throw EditError.invalid("A privacy copy must keep its source picture. Redact the other source to create a new request.")
+            }
+            guard clip.video?.redaction == before.video?.redaction,
+                  clip.video?.redactionSources == before.video?.redactionSources,
+                  clip.video?.redactionEffectID == before.video?.redactionEffectID,
+                  clip.video?.redactionOriginID == before.video?.redactionOriginID,
+                  clip.video?.redactionVisibility == before.video?.redactionVisibility else {
+                throw EditError.invalid("Privacy source intent cannot be cleared with video properties. Use the redaction's enabled or effect controls.")
+            }
+            if patchSets(patch, "enabled") {
+                clip.video?.redactionVisibility = clip.enabled ? .followingPicture : .disabled
+            }
+        }
         // A clip's gain set before it was levelled (a bed's -31 dB from
         // placing it) was chosen against the file as it is. Levelling to a
         // loudness replaces that choice, so the old gain stacking on top
@@ -1316,7 +1457,7 @@ public enum Editing {
     }
 
     /// Whether a merge patch names this key path, with any value.
-    private static func patchSets(_ patch: JSONValue, _ path: String...) -> Bool {
+    static func patchSets(_ patch: JSONValue, _ path: String...) -> Bool {
         var value = patch
         for key in path {
             guard case .object(let object) = value, let next = object[key] else { return false }
@@ -1328,6 +1469,7 @@ public enum Editing {
     static func link(_ p: inout Project, _ clipIDs: [String], _ context: inout EditContext) throws {
         let ids = try expand(p, clipIDs, includeLinked: true)
         guard ids.count > 1 else { throw EditError.invalid("link needs at least two clips") }
+        for id in ids { let (track, _) = try requireClip(p, id); try requireUnlocked(p[track]) }
         let group = context.makeID("lnk")
         let idSet = Set(ids)
         for location in p.trackLocations {
@@ -1338,6 +1480,7 @@ public enum Editing {
     }
 
     static func unlink(_ p: inout Project, _ clipIDs: [String]) throws {
+        for id in clipIDs { let (track, _) = try requireClip(p, id); try requireUnlocked(p[track]) }
         for id in clipIDs {
             let (location, index) = try requireClip(p, id)
             p[location].clips[index].linkGroup = nil
