@@ -19,7 +19,7 @@ git remote -v
 
 ## 2. Syncing Fork with Upstream
 
-**Last synced:** 21 Nov 2025, at merge commit `a536e85` (upstream `829910e`, "iPhone HDR footage looks the same paused, playing and exported"). Upstream's build scripts and `Package.swift` were unchanged in that batch, so the workarounds below needed no revision.
+**Last synced:** 27 Nov 2026, at upstream `30ef844` ("drag: keep privacy file lookups across drag previews, match owners in linear time"). Upstream's build scripts were unchanged; `Package.swift` gained a debug `-O` setting for TandemCore (a drag-lag fix), which needs no changes to the workarounds below.
 
 To bring this fork up to date with the latest changes from Mike Cann's upstream repository:
 
